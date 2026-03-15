@@ -26,3 +26,6 @@ docs/*
 .vscode/
 
 *-cwd
+
+# Temporary deployment state files
+scripts/deployments/deployment-*.json

@@ -46,7 +46,12 @@ contract PrngSystemContract is IPrngSystemContract {
         bytes32 seedBytes = this.getPseudorandomSeed();
         uint256 choice = bytesToUint(keccak256(abi.encodePacked(block.timestamp, seedBytes, userSeed, msg.sender)));
 
-    	randNum = lo + (choice % (hi - lo + 1));
+		// Handle full uint256 range without overflow in (hi - lo + 1)
+    	if (lo == 0 && hi == MAX_UINT256) {
+			randNum = choice;
+		} else {
+			randNum = lo + (choice % (hi - lo + 1));
+		}
 		emit PrngEvent(RandomType.RANGE, msg.sender, randNum, seedBytes, lo, hi, userSeed, block.timestamp);
         return randNum;
     }
