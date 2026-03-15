@@ -18,20 +18,17 @@
  *   --signers=Alice,Bob,Charlie     Label signers for clarity
  */
 
+require('dotenv').config();
 const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
 	Hbar,
 	HbarUnit,
 } = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
-require('dotenv').config();
-
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const { homebrewPopulateAccountNum, getTokenDetails } = require('../../../../utils/hederaMirrorHelpers');
+const { estimateGas } = require('../../../../utils/gasHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
@@ -39,26 +36,9 @@ const {
 } = require('../../../../utils/scriptHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
 let tokenDets = null;
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
 
 // Helper: Convert address formats
 function convertToEvmAddress(hederaId) {
@@ -88,24 +68,8 @@ async function createPool() {
 	let client;
 
 	try {
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║           LazyLotto Create Pool (Admin)                  ║');
@@ -117,24 +81,15 @@ async function createPool() {
 		displayMultiSigBanner();
 
 		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
-
-		// Import helpers
-		const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
-		const { estimateGas } = require('../../../../utils/gasHelpers');
+		const lazyLottoIface = loadInterface('LazyLotto');
 
 		// Check admin role
 		console.log('🔍 Verifying admin role...');
 		const userEvmAddress = '0x' + operatorId.toSolidityAddress();
 
-		let encodedCommand = lazyLottoIface.encodeFunctionData('isAdmin', [userEvmAddress]);
-		let result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const hasAdmin = lazyLottoIface.decodeFunctionResult('isAdmin', result);
+		const hasAdminResult = await queryContract(env, contractId, lazyLottoIface, 'isAdmin', [userEvmAddress], operatorId);
 
-		if (!hasAdmin[0]) {
+		if (!hasAdminResult[0]) {
 			console.error('❌ You do not have ADMIN role on this contract');
 			process.exit(1);
 		}
@@ -191,7 +146,7 @@ async function createPool() {
 			tokenSymbol = await prompt('Enter token symbol: ');
 			tokenMemo = await prompt('Enter token memo (optional, press enter to skip): ') || 'LazyLotto Pool Token';
 
-			console.log('\n💡 Note: Pool token creation requires ~20 HBAR fee\n');
+			console.log('\n💡 Note: Pool token creation requires ~40 HBAR fee\n');
 		}
 		else {
 			console.error('❌ Only new token creation is supported. Use existing tokens for advanced scenarios.');
@@ -314,18 +269,19 @@ async function createPool() {
 			entryFee,
 			feeToken,
 		];
-		// 20 HBAR for token creation
-		const payableAmount = Number(new Hbar(20).toTinybars());
+		// 40 HBAR for token creation
+		const payableAmountHbar = 40;
+		const payableAmountTinybar = Number(new Hbar(payableAmountHbar).toTinybars());
 
-		const gasInfo = await estimateGas(env, contractId, lazyLottoIface, operatorId, functionName, functionArgs, 800000, payableAmount);
+		const gasInfo = await estimateGas(env, contractId, lazyLottoIface, operatorId, functionName, functionArgs, 800000, payableAmountTinybar);
 		const gasEstimate = gasInfo.gasLimit;
 		console.log(`   Gas: ~${gasEstimate}\n`);
 
-		console.log('💰 Pool creation fee: 20 HBAR (for NFT token creation)\n');
+		console.log('💰 Pool creation fee: 40 HBAR (for NFT token creation)\n');
 
 		// Confirm
-		const confirm = await prompt('Proceed with pool creation? (yes/no): ');
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt('Proceed with pool creation? (yes/no): ');
+		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Pool creation cancelled');
 			process.exit(0);
 		}
@@ -342,7 +298,7 @@ async function createPool() {
 			functionName: functionName,
 			params: functionArgs,
 			gas: gasLimit,
-			payableAmount: payableAmount.toString(),
+			payableAmount: payableAmountHbar,
 		});
 
 		if (!executionResult.success) {
@@ -380,10 +336,8 @@ async function createPool() {
 		await new Promise(resolve => setTimeout(resolve, 3000));
 
 		// Get pool details
-		encodedCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [newPoolId]);
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const [, , verifyWinRate, verifyEntryFee, , , verifyPoolTokenId, , , verifyFeeToken] =
-			lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', result);
+		const verifyResult = await queryContract(env, contractId, lazyLottoIface, 'getPoolBasicInfo', [newPoolId], operatorId);
+		const [, , verifyWinRate, verifyEntryFee, , , verifyPoolTokenId, , , verifyFeeToken] = verifyResult;
 
 		// Format entry fee with proper decimals
 		const verifyFeeTokenId = await convertToHederaId(verifyFeeToken);

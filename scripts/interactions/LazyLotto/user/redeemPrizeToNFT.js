@@ -7,41 +7,21 @@
  * Usage: node scripts/interactions/LazyLotto/user/redeemPrizeToNFT.js [index1,index2,...]
  */
 
+require('dotenv').config();
 const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
 	TokenId,
 	Hbar,
 	HbarUnit,
 } = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const { associateTokensToAccount } = require('../../../../utils/hederaHelpers');
-require('dotenv').config();
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
 
 // Helper: Convert EVM address to Hedera ID
 async function convertToHederaId(evmAddress) {
@@ -61,24 +41,8 @@ async function redeemPrizeToNFT() {
 		// Get indices parameter
 		let indicesStr = process.argv[2];
 
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║         LazyLotto Redeem Prizes to NFT Format             ║');
@@ -88,13 +52,10 @@ async function redeemPrizeToNFT() {
 		console.log(`👤 User: ${operatorId.toString()}\n`);
 
 		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
+		const lazyLottoIface = loadInterface('LazyLotto');
 
 		// Import helpers
-		const { contractExecuteFunction, readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
+		const { contractExecuteFunction } = require('../../../../utils/solidityHelpers');
 		const { estimateGas } = require('../../../../utils/gasHelpers');
 		const { getTokenDetails } = require('../../../../utils/hederaMirrorHelpers');
 
@@ -103,15 +64,8 @@ async function redeemPrizeToNFT() {
 
 		// Get pending prizes count first
 		const userAddress = `0x${operatorId.toSolidityAddress()}`;
-		const countQuery = lazyLottoIface.encodeFunctionData('getPendingPrizesCount', [userAddress]);
-		const countResult = await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			countQuery,
-			operatorId,
-			false,
-		);
-		const prizeCount = lazyLottoIface.decodeFunctionResult('getPendingPrizesCount', countResult)[0];
+		const countResult = await queryContract(env, contractId, lazyLottoIface, 'getPendingPrizesCount', [userAddress], operatorId);
+		const prizeCount = countResult[0];
 
 		if (Number(prizeCount) === 0) {
 			console.log('⚠️  No pending prizes found\n');
@@ -119,15 +73,7 @@ async function redeemPrizeToNFT() {
 		}
 
 		// Get all pending prizes
-		const encodedQuery = lazyLottoIface.encodeFunctionData('getPendingPrizesPage', [userAddress, 0, Number(prizeCount)]);
-		let result = await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			encodedQuery,
-			operatorId,
-			false,
-		);
-		const pendingPrizesResult = lazyLottoIface.decodeFunctionResult('getPendingPrizesPage', result);
+		const pendingPrizesResult = await queryContract(env, contractId, lazyLottoIface, 'getPendingPrizesPage', [userAddress, 0, Number(prizeCount)], operatorId);
 		const pendingPrizes = pendingPrizesResult[0];
 
 		if (!pendingPrizes || pendingPrizes.length === 0) {
@@ -227,16 +173,15 @@ async function redeemPrizeToNFT() {
 		const { checkMirrorBalance } = require('../../../../utils/hederaMirrorHelpers');
 
 		for (const poolId of poolIds) {
-			const poolInfoCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [poolId]);
-			const poolInfoResult = await readOnlyEVMFromMirrorNode(env, contractId, poolInfoCommand, operatorId, false);
-			const [, , , , , , poolTokenIdEvm] = lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', poolInfoResult);
+			const poolInfoResult = await queryContract(env, contractId, lazyLottoIface, 'getPoolBasicInfo', [poolId], operatorId);
+			const poolTokenIdEvm = poolInfoResult[6];
 
 			const poolTokenHederaId = await convertToHederaId(poolTokenIdEvm);
 			const userBalance = await checkMirrorBalance(env, operatorId, poolTokenHederaId);
 
 			if (userBalance === null) {
 				console.log(`🔗 Associating pool #${poolId} token (${poolTokenHederaId})...`);
-				result = await associateTokensToAccount(
+				const result = await associateTokensToAccount(
 					client,
 					operatorId,
 					operatorKey,
@@ -264,8 +209,8 @@ async function redeemPrizeToNFT() {
 		const gasEstimate = gasInfo.gasLimit;
 
 		// Confirm
-		const confirm = await prompt(`Redeem ${indices.length} prize(s) to NFT format? (yes/no): `);
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt(`Redeem ${indices.length} prize(s) to NFT format? (yes/no): `);
+		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Operation cancelled');
 			process.exit(0);
 		}

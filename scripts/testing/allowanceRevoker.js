@@ -1,58 +1,14 @@
-const { AccountAllowanceApproveTransaction, AccountId, TokenId, PrivateKey, Client } = require('@hashgraph/sdk');
+const { AccountAllowanceApproveTransaction, AccountId, TokenId } = require('@hashgraph/sdk');
 const axios = require('axios');
 const readlineSync = require('readline-sync');
 const { checkHbarAllowances } = require('../../utils/hederaMirrorHelpers');
-require('dotenv').config();
-
-const env = process.env.ENVIRONMENT;
-
-let client, operatorKey, operatorId;
-
-try {
-	operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-	operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-}
-catch (err) {
-	console.log('ERROR: Must specify PRIVATE_KEY & ACCOUNT_ID in the .env file');
-}
+const { getEnvConfig, createClient } = require('../../utils/clientFactory');
 
 async function main() {
-	if (
-		operatorKey === undefined ||
-		operatorKey == null ||
-		operatorId === undefined ||
-		operatorId == null
-	) {
-		console.log(
-			'Environment required, please specify PRIVATE_KEY & ACCOUNT_ID in the .env file',
-		);
-		process.exit(1);
-	}
+	const { operatorId, operatorKey, env } = getEnvConfig();
+	const client = createClient(env, operatorId, operatorKey);
 
-
-	console.log('\n-Using ENIVRONMENT:', env);
-
-	if (env.toUpperCase() == 'TEST') {
-		client = Client.forTestnet();
-		console.log('operating in *TESTNET*');
-	}
-	else if (env.toUpperCase() == 'MAIN') {
-		client = Client.forMainnet();
-		console.log('operating in *MAINNET*');
-	}
-	else if (env.toUpperCase() == 'PREVIEW') {
-		client = Client.forPreviewnet();
-		console.log('operating in *PREVIEWNET*');
-	}
-	else if (env.toUpperCase() == 'LOCAL') {
-		const node = { '127.0.0.1:50211': new AccountId(3) };
-		client = Client.forNetwork(node).setMirrorNetwork('127.0.0.1:5600');
-		console.log('operating in *LOCAL*');
-	}
-	else {
-		throw new Error('ERROR: Must specify either MAIN, TEST, LOCAL or PREVIEW as environment');
-	}
-	client.setOperator(operatorId, operatorKey);
+	console.log('\n-Using ENVIRONMENT:', env);
 
 	console.log('Checking:', operatorId.toString());
 

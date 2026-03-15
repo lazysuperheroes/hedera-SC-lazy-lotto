@@ -12,49 +12,26 @@
  * Usage: node scripts/interactions/LazyLotto/queries/poolManagerInfo.js
  */
 
+require('dotenv').config();
 const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
 	Hbar,
 	HbarUnit,
 } = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-require('dotenv').config();
-
-const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { queryContract } = require('../../../../utils/queryHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const poolManagerId = ContractId.fromString(process.env.LAZY_LOTTO_POOL_MANAGER_ID);
-const lazyDecimals = Number(process.env.LAZY_DECIMALS || 1);
+const { operatorId, operatorKey, env } = getEnvConfig();
+const poolManagerId = getContractId('LAZY_LOTTO_POOL_MANAGER_ID');
+const lazyDecimals = parseInt(process.env.LAZY_DECIMALS ?? '1');
 
 async function getPoolManagerInfo() {
 	let client;
 
 	try {
-		// Normalize environment name
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║        LazyLottoPoolManager Information Query             ║');
@@ -64,21 +41,14 @@ async function getPoolManagerInfo() {
 		console.log(`👤 Querying as: ${operatorId.toString()}\n`);
 
 		// Load interface
-		const poolManagerJson = JSON.parse(
-			fs.readFileSync(
-				'./artifacts/contracts/LazyLottoPoolManager.sol/LazyLottoPoolManager.json',
-			),
-		);
-		const poolManagerIface = new ethers.Interface(poolManagerJson.abi);
+		const poolManagerIface = loadInterface('LazyLottoPoolManager');
 
 		// === CREATION FEES ===
 		console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 		console.log('💰 CREATION FEES (for community pools)');
 		console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-		let encodedCommand = poolManagerIface.encodeFunctionData('getCreationFees');
-		let result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const fees = poolManagerIface.decodeFunctionResult('getCreationFees', result);
+		const fees = await queryContract(env, poolManagerId, poolManagerIface, 'getCreationFees', [], operatorId);
 
 		const hbarFee = Number(fees[0]);
 		const lazyFee = Number(fees[1]);
@@ -93,9 +63,7 @@ async function getPoolManagerInfo() {
 		console.log('🏦 PLATFORM FEE CONFIGURATION');
 		console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-		encodedCommand = poolManagerIface.encodeFunctionData('platformProceedsPercentage');
-		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const platformFee = poolManagerIface.decodeFunctionResult('platformProceedsPercentage', result);
+		const platformFee = await queryContract(env, poolManagerId, poolManagerIface, 'platformProceedsPercentage', [], operatorId);
 
 		console.log(`   Platform Proceeds: ${platformFee[0]}% of pool entry fees`);
 		console.log(`   Pool Owner Gets: ${100 - Number(platformFee[0])}% of pool entry fees\n`);
@@ -105,9 +73,7 @@ async function getPoolManagerInfo() {
 		console.log('⏰ TIME-BASED BONUSES');
 		console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-		encodedCommand = poolManagerIface.encodeFunctionData('totalTimeBonuses');
-		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const totalTimeBonuses = poolManagerIface.decodeFunctionResult('totalTimeBonuses', result);
+		const totalTimeBonuses = await queryContract(env, poolManagerId, poolManagerIface, 'totalTimeBonuses', [], operatorId);
 
 		if (Number(totalTimeBonuses[0]) === 0) {
 			console.log('   ⚠️  No time bonuses configured\n');
@@ -123,9 +89,7 @@ async function getPoolManagerInfo() {
 		console.log('🎨 NFT HOLDING BONUSES');
 		console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-		encodedCommand = poolManagerIface.encodeFunctionData('totalNFTBonusTokens');
-		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const totalNFTBonuses = poolManagerIface.decodeFunctionResult('totalNFTBonusTokens', result);
+		const totalNFTBonuses = await queryContract(env, poolManagerId, poolManagerIface, 'totalNFTBonusTokens', [], operatorId);
 
 		if (Number(totalNFTBonuses[0]) === 0) {
 			console.log('   ⚠️  No NFT bonuses configured\n');
@@ -140,13 +104,8 @@ async function getPoolManagerInfo() {
 		console.log('💎 LAZY BALANCE BONUS');
 		console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-		encodedCommand = poolManagerIface.encodeFunctionData('lazyBalanceThreshold');
-		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const threshold = poolManagerIface.decodeFunctionResult('lazyBalanceThreshold', result);
-
-		encodedCommand = poolManagerIface.encodeFunctionData('lazyBalanceBonusBps');
-		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const bonusBps = poolManagerIface.decodeFunctionResult('lazyBalanceBonusBps', result);
+		const threshold = await queryContract(env, poolManagerId, poolManagerIface, 'lazyBalanceThreshold', [], operatorId);
+		const bonusBps = await queryContract(env, poolManagerId, poolManagerIface, 'lazyBalanceBonusBps', [], operatorId);
 
 		if (Number(threshold[0]) === 0 || Number(bonusBps[0]) === 0) {
 			console.log('   ⚠️  No LAZY balance bonus configured\n');
@@ -163,13 +122,8 @@ async function getPoolManagerInfo() {
 		console.log('📊 POOL STATISTICS');
 		console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-		encodedCommand = poolManagerIface.encodeFunctionData('totalGlobalPools');
-		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const totalGlobal = poolManagerIface.decodeFunctionResult('totalGlobalPools', result);
-
-		encodedCommand = poolManagerIface.encodeFunctionData('totalCommunityPools');
-		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const totalCommunity = poolManagerIface.decodeFunctionResult('totalCommunityPools', result);
+		const totalGlobal = await queryContract(env, poolManagerId, poolManagerIface, 'totalGlobalPools', [], operatorId);
+		const totalCommunity = await queryContract(env, poolManagerId, poolManagerIface, 'totalCommunityPools', [], operatorId);
 
 		console.log(`   Global Pools (admin-created): ${totalGlobal[0]}`);
 		console.log(`   Community Pools (user-created): ${totalCommunity[0]}`);

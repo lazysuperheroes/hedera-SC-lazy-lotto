@@ -17,18 +17,14 @@
  *   --signers=Alice,Bob,Charlie     Label signers for clarity
  */
 
-const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
-	Hbar,
-} = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
 require('dotenv').config();
-
+const { ContractId, Hbar } = require('@hashgraph/sdk');
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
+const { homebrewPopulateAccountNum, EntityType, getTokenDetails } = require('../../../../utils/hederaMirrorHelpers');
+const { estimateGas } = require('../../../../utils/gasHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
@@ -36,25 +32,8 @@ const {
 } = require('../../../../utils/scriptHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const poolManagerId = ContractId.fromString(process.env.LAZY_LOTTO_POOL_MANAGER_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const poolManagerId = getContractId('LAZY_LOTTO_POOL_MANAGER_ID');
 
 // Helper: Sleep
 function sleep(ms) {
@@ -86,24 +65,8 @@ async function setCreationFees() {
 			}
 		}
 
-		// Normalize environment name
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║         LazyLotto Set Creation Fees (Admin)               ║');
@@ -115,19 +78,18 @@ async function setCreationFees() {
 		displayMultiSigBanner();
 
 		// Load PoolManager ABI
-		const poolManagerJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLottoPoolManager.sol/LazyLottoPoolManager.json'),
-		);
-		const poolManagerIface = new ethers.Interface(poolManagerJson.abi);
+		const poolManagerIface = loadInterface('LazyLottoPoolManager');
 
-		const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
-		const { estimateGas } = require('../../../../utils/gasHelpers');
-
-		// Check if operator is admin
+		// Check if operator is admin (isAdmin lives on LazyLotto, not PoolManager)
 		console.log('🔍 Verifying admin permissions...\n');
-		let encodedCommand = poolManagerIface.encodeFunctionData('isAdmin', [operatorId.toSolidityAddress()]);
-		let result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const isAdmin = poolManagerIface.decodeFunctionResult('isAdmin', result)[0];
+		const lazyLottoAddrResult = await queryContract(env, poolManagerId, poolManagerIface, 'lazyLotto', [], operatorId);
+		const lazyLottoAddr = lazyLottoAddrResult[0];
+		const lazyLottoId = ContractId.fromString(await homebrewPopulateAccountNum(env, lazyLottoAddr, EntityType.CONTRACT));
+
+		const lazyLottoIface = loadInterface('LazyLotto');
+
+		const isAdminResult = await queryContract(env, lazyLottoId, lazyLottoIface, 'isAdmin', [operatorId.toSolidityAddress()], operatorId);
+		const isAdmin = isAdminResult[0];
 
 		if (!isAdmin) {
 			console.error('❌ You are not an admin of the PoolManager contract');
@@ -136,48 +98,59 @@ async function setCreationFees() {
 
 		console.log('✅ Admin status confirmed\n');
 
+		// Get LAZY token address and decimals from mirror node
+		const lazyTokenAddrResult = await queryContract(env, poolManagerId, poolManagerIface, 'lazyToken', [], operatorId);
+		const lazyTokenAddr = lazyTokenAddrResult[0];
+		const lazyTokenId = await homebrewPopulateAccountNum(env, lazyTokenAddr, EntityType.TOKEN);
+
+		const lazyTokenDetails = await getTokenDetails(env, lazyTokenId);
+		const lazyDecimals = Number(lazyTokenDetails.decimals);
+		const lazySymbol = lazyTokenDetails.symbol || 'LAZY';
+
 		// Get current fees
 		console.log('🔍 Fetching current fees...\n');
-		encodedCommand = poolManagerIface.encodeFunctionData('getCreationFees');
-		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const [currentHbarFee, currentLazyFee] = poolManagerIface.decodeFunctionResult('getCreationFees', result);
+		const currentFeesResult = await queryContract(env, poolManagerId, poolManagerIface, 'getCreationFees', [], operatorId);
+		const [currentHbarFee, currentLazyFee] = currentFeesResult;
+
+		const currentLazyDisplay = Number(currentLazyFee) / (10 ** lazyDecimals);
 
 		console.log('═══════════════════════════════════════════════════════════');
 		console.log('  CURRENT FEES');
 		console.log('═══════════════════════════════════════════════════════════');
 		console.log(`  HBAR Fee:         ${Hbar.fromTinybars(currentHbarFee).toString()}`);
-		console.log(`  LAZY Fee:         ${currentLazyFee} LAZY`);
+		console.log(`  ${lazySymbol} Fee:         ${currentLazyDisplay} ${lazySymbol} (${lazyDecimals} decimals)`);
 		console.log('═══════════════════════════════════════════════════════════\n');
 
 		// Prompt for new fees if not provided
 		if (hbarFeeInput === null) {
-			hbarFeeInput = await prompt(`Enter new HBAR fee (current: ${Hbar.fromTinybars(currentHbarFee).toString()}): `);
+			hbarFeeInput = await prompt(`Enter new HBAR fee in whole HBAR (current: ${Hbar.fromTinybars(currentHbarFee).toString()}): `);
 		}
 
 		if (lazyFeeInput === null) {
-			lazyFeeInput = await prompt(`Enter new LAZY fee (current: ${currentLazyFee}): `);
+			lazyFeeInput = await prompt(`Enter new ${lazySymbol} fee in whole ${lazySymbol} (current: ${currentLazyDisplay}): `);
 		}
 
-		// Parse and validate fees
-		const newHbarFee = Hbar.from(parseFloat(hbarFeeInput), Hbar.HbarUnit.Hbar);
-		const newLazyFee = BigInt(lazyFeeInput);
+		// Parse and validate fees - convert whole units to base units
+		const newHbarFee = Hbar.from(parseFloat(hbarFeeInput));
+		const newLazyFeeBaseUnits = BigInt(Math.floor(parseFloat(lazyFeeInput) * (10 ** lazyDecimals)));
 
-		if (newHbarFee.toTinybars() < 0) {
+		if (BigInt(newHbarFee.toTinybars().toString()) < 0) {
 			console.error('❌ HBAR fee cannot be negative');
 			process.exit(1);
 		}
 
-		if (newLazyFee < 0n) {
-			console.error('❌ LAZY fee cannot be negative');
+		if (newLazyFeeBaseUnits < 0n) {
+			console.error(`❌ ${lazySymbol} fee cannot be negative`);
 			process.exit(1);
 		}
 
 		// Display new fees
+		const newLazyDisplay = Number(newLazyFeeBaseUnits) / (10 ** lazyDecimals);
 		console.log('═══════════════════════════════════════════════════════════');
 		console.log('  NEW FEES');
 		console.log('═══════════════════════════════════════════════════════════');
-		console.log(`  HBAR Fee:         ${newHbarFee.toString()} (${newHbarFee.toTinybars()} tinybars)`);
-		console.log(`  LAZY Fee:         ${newLazyFee} LAZY`);
+		console.log(`  HBAR Fee:         ${newHbarFee.toString()} (${BigInt(newHbarFee.toTinybars().toString())} tinybars)`);
+		console.log(`  ${lazySymbol} Fee:         ${newLazyDisplay} ${lazySymbol} (${newLazyFeeBaseUnits} base units)`);
 		console.log('═══════════════════════════════════════════════════════════\n');
 
 		// Confirm action
@@ -195,7 +168,7 @@ async function setCreationFees() {
 			poolManagerIface,
 			operatorId,
 			'setCreationFees',
-			[newHbarFee.toTinybars(), newLazyFee],
+			[BigInt(newHbarFee.toTinybars().toString()), newLazyFeeBaseUnits],
 			150000,
 		);
 		const gasEstimate = gasInfo.gasLimit;
@@ -213,7 +186,7 @@ async function setCreationFees() {
 			iface: poolManagerIface,
 			client: client,
 			functionName: 'setCreationFees',
-			params: [newHbarFee.toTinybars(), newLazyFee],
+			params: [BigInt(newHbarFee.toTinybars().toString()), newLazyFeeBaseUnits],
 			gas: gasToUse,
 			payableAmount: 0,
 		});
@@ -234,15 +207,15 @@ async function setCreationFees() {
 
 		// Verify new fees
 		console.log('🔍 Verifying updated fees...\n');
-		encodedCommand = poolManagerIface.encodeFunctionData('getCreationFees');
-		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const [verifyHbarFee, verifyLazyFee] = poolManagerIface.decodeFunctionResult('getCreationFees', result);
+		const verifyResult = await queryContract(env, poolManagerId, poolManagerIface, 'getCreationFees', [], operatorId);
+		const [verifyHbarFee, verifyLazyFee] = verifyResult;
 
+		const verifyLazyDisplay = Number(verifyLazyFee) / (10 ** lazyDecimals);
 		console.log('═══════════════════════════════════════════════════════════');
 		console.log('  UPDATED FEES');
 		console.log('═══════════════════════════════════════════════════════════');
 		console.log(`  HBAR Fee:         ${Hbar.fromTinybars(verifyHbarFee).toString()}`);
-		console.log(`  LAZY Fee:         ${verifyLazyFee} LAZY`);
+		console.log(`  ${lazySymbol} Fee:         ${verifyLazyDisplay} ${lazySymbol}`);
 		console.log('═══════════════════════════════════════════════════════════\n');
 
 		console.log('✨ Creation fees updated successfully!\n');

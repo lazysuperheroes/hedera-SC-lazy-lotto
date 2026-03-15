@@ -19,17 +19,11 @@
  *   --signers=Alice,Bob,Charlie     Label signers for clarity
  */
 
-const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
-} = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
 require('dotenv').config();
-
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
@@ -37,25 +31,8 @@ const {
 } = require('../../../../utils/scriptHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
 
 async function setBurnPercentage() {
 	// Check for multi-sig help request
@@ -66,24 +43,8 @@ async function setBurnPercentage() {
 	let client;
 
 	try {
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║        LazyLotto Set Burn Percentage (Admin)              ║');
@@ -95,19 +56,11 @@ async function setBurnPercentage() {
 		displayMultiSigBanner();
 
 		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
-
-		// Import helpers
-		const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
+		const lazyLottoIface = loadInterface('LazyLotto');
 
 		// Get current burn percentage
 		try {
-			const encodedQuery = lazyLottoIface.encodeFunctionData('burnPercentage', []);
-			const result = await readOnlyEVMFromMirrorNode(env, contractId, encodedQuery, operatorId, false);
-			const decoded = lazyLottoIface.decodeFunctionResult('burnPercentage', result);
+			const decoded = await queryContract(env, contractId, lazyLottoIface, 'burnPercentage', [], operatorId);
 			const currentBurnPercentage = decoded[0];
 			console.log(`📊 Current burn percentage: ${currentBurnPercentage}%\n`);
 		}
@@ -134,8 +87,8 @@ async function setBurnPercentage() {
 		console.log(`\n🔥 New burn percentage: ${burnPercentage}%`);
 
 		// Confirm
-		const confirm = await prompt(`Set burn percentage to ${burnPercentage}%? (yes/no): `);
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt(`Set burn percentage to ${burnPercentage}%? (yes/no): `);
+		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Operation cancelled');
 			process.exit(0);
 		}

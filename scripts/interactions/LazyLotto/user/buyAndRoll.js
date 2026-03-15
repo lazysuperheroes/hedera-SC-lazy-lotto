@@ -8,44 +8,25 @@
  * Usage: node scripts/interactions/LazyLotto/user/buyAndRoll.js [poolId] [ticketCount]
  */
 
+require('dotenv').config();
 const {
-	Client,
-	AccountId,
-	PrivateKey,
 	ContractId,
 	TokenId,
 	Hbar,
 	HbarUnit,
 } = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const { associateTokensToAccount, setFTAllowance } = require('../../../../utils/hederaHelpers');
 const { getTokenDetails } = require('../../../../utils/hederaMirrorHelpers');
-require('dotenv').config();
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
 const lazyTokenId = process.env.LAZY_TOKEN_ID ? TokenId.fromString(process.env.LAZY_TOKEN_ID) : null;
 const lazyGasStationId = process.env.LAZY_GAS_STATION ? ContractId.fromString(process.env.LAZY_GAS_STATION) : null;
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
 
 // Helper: Convert EVM address to Hedera ID
 async function convertToHederaId(evmAddress) {
@@ -90,24 +71,8 @@ async function buyAndRoll() {
 			process.exit(1);
 		}
 
-		// Normalize environment name
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║          LazyLotto Buy & Roll Entries (Combined)          ║');
@@ -118,24 +83,19 @@ async function buyAndRoll() {
 		console.log(`🎫 Tickets: ${ticketCount}\n`);
 
 		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
+		const lazyLottoIface = loadInterface('LazyLotto');
 
 		// Import helpers
-		const { contractExecuteFunction, readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
+		const { contractExecuteFunction } = require('../../../../utils/solidityHelpers');
 		const { estimateGas } = require('../../../../utils/gasHelpers');
 		const { checkMirrorBalance, checkMirrorHbarBalance } = require('../../../../utils/hederaMirrorHelpers');
 
 		// Get pool details
 		console.log('🔍 Fetching pool details...\n');
 
-		const poolInfoCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [poolId]);
-		const poolInfoResult = await readOnlyEVMFromMirrorNode(env, contractId, poolInfoCommand, operatorId, false);
 		// eslint-disable-next-line no-unused-vars
 		const [ticketCID, winCID, winRate, entryFee, prizeCount, outstanding, poolTokenId, paused, closed, feeToken] =
-			lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', poolInfoResult);
+			await queryContract(env, contractId, lazyLottoIface, 'getPoolBasicInfo', [poolId], operatorId);
 
 		if (closed) {
 			console.error('❌ Pool is closed');
@@ -148,9 +108,8 @@ async function buyAndRoll() {
 		}
 
 		// Get storage contract address
-		const storageCommand = lazyLottoIface.encodeFunctionData('storageContract');
-		const storageResult = await readOnlyEVMFromMirrorNode(env, contractId, storageCommand, operatorId, false);
-		const storageAddress = lazyLottoIface.decodeFunctionResult('storageContract', storageResult)[0];
+		const storageResult = await queryContract(env, contractId, lazyLottoIface, 'storageContract', [], operatorId);
+		const storageAddress = storageResult[0];
 		const storageContractId = ContractId.fromSolidityAddress(storageAddress);
 
 		// Get fee token details
@@ -164,9 +123,8 @@ async function buyAndRoll() {
 		const totalCost = BigInt(entryFee) * BigInt(ticketCount);
 
 		// Get bonus calculation
-		const boostCommand = lazyLottoIface.encodeFunctionData('calculateBoost', [operatorId.toSolidityAddress()]);
-		const boostResult = await readOnlyEVMFromMirrorNode(env, contractId, boostCommand, operatorId, false);
-		const boost = lazyLottoIface.decodeFunctionResult('calculateBoost', boostResult)[0];
+		const boostResult = await queryContract(env, contractId, lazyLottoIface, 'calculateBoost', [operatorId.toSolidityAddress()], operatorId);
+		const boost = boostResult[0];
 
 		const baseWinRate = Number(winRate);
 		const effectiveWinRate = Math.min(baseWinRate + Number(boost), 100_000_000);
@@ -235,9 +193,9 @@ async function buyAndRoll() {
 
 			const allowanceResult = await setFTAllowance(
 				client,
+				feeTokenId,
 				operatorId,
 				spenderContract,
-				feeTokenId,
 				totalCost,
 			);
 
@@ -288,8 +246,8 @@ async function buyAndRoll() {
 		console.log(`   With 20% buffer: ${gasLimit} gas\n`);
 
 		// Confirm
-		const confirm = await prompt(`Buy ${ticketCount} tickets and roll immediately? (yes/no): `);
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt(`Buy ${ticketCount} tickets and roll immediately? (yes/no): `);
+		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Operation cancelled');
 			process.exit(0);
 		}

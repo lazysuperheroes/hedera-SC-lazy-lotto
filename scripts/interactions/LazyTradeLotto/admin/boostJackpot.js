@@ -20,18 +20,15 @@
  * Example: node admin/boostJackpot.js 0.0.123456 1000
  */
 
+require('dotenv').config();
 const {
-	Client,
-	AccountId,
-	PrivateKey,
 	ContractId,
 	TokenId,
 } = require('@hashgraph/sdk');
-require('dotenv').config();
-const fs = require('fs');
-const { ethers } = require('ethers');
 const readlineSync = require('readline-sync');
-const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
+const { createClient, getEnvConfig } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const { getArgFlag } = require('../../../../utils/nodeHelpers');
 const { getTokenDetails } = require('../../../../utils/hederaMirrorHelpers');
 const {
@@ -42,19 +39,10 @@ const {
 
 const contractName = 'LazyTradeLotto';
 const LAZY_TOKEN_ID = process.env.LAZY_TOKEN_ID;
-const LAZY_DECIMAL = process.env.LAZY_DECIMALS ?? 1;
-const env = process.env.ENVIRONMENT ?? null;
-let client;
+const LAZY_DECIMAL = parseInt(process.env.LAZY_DECIMALS ?? '1');
 
-let operatorKey, operatorId;
-try {
-	operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-	operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-}
-catch {
-	console.log('ERROR: Must specify PRIVATE_KEY & ACCOUNT_ID in the .env file');
-	process.exit(1);
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+let client;
 
 async function main() {
 	// Check for multi-sig help request
@@ -62,36 +50,10 @@ async function main() {
 		process.exit(0);
 	}
 
-	if (!env) {
-		console.log('ERROR: Must specify ENVIRONMENT in .env file');
-		process.exit(1);
-	}
-
 	console.log('\n-Using ENVIRONMENT:', env);
 
-	// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-	const envUpper = env.toUpperCase();
-
 	// Initialize client
-	if (envUpper === 'TEST' || envUpper === 'TESTNET') {
-		client = Client.forTestnet();
-	}
-	else if (envUpper === 'MAIN' || envUpper === 'MAINNET') {
-		client = Client.forMainnet();
-	}
-	else if (envUpper === 'PREVIEW' || envUpper === 'PREVIEWNET') {
-		client = Client.forPreviewnet();
-	}
-	else if (envUpper === 'LOCAL') {
-		const node = { '127.0.0.1:50211': new AccountId(3) };
-		client = Client.forNetwork(node).setMirrorNetwork('127.0.0.1:5600');
-	}
-	else {
-		console.log('ERROR: Must specify either MAIN/MAINNET, TEST/TESTNET, PREVIEW/PREVIEWNET, or LOCAL as ENVIRONMENT');
-		return;
-	}
-
-	client.setOperator(operatorId, operatorKey);
+	client = createClient(env, operatorId, operatorKey);
 
 	const args = process.argv.slice(2).filter(arg => !arg.startsWith('--'));
 	if (args.length < 2 || getArgFlag('h')) {
@@ -105,8 +67,7 @@ async function main() {
 	}
 
 	// Import ABI
-	const ltlJSON = JSON.parse(fs.readFileSync(`./abi/${contractName}.json`));
-	const ltlIface = new ethers.Interface(ltlJSON);
+	const ltlIface = loadInterface(contractName);
 
 	const contractId = ContractId.fromString(args[0]);
 	const boostAmount = Number(args[1]);
@@ -133,15 +94,7 @@ async function main() {
 	}
 
 	// Get current jackpot amount using mirror node
-	const lottoStatsCommand = ltlIface.encodeFunctionData('getLottoStats');
-	const lottoStatsResponse = await readOnlyEVMFromMirrorNode(
-		env,
-		contractId,
-		lottoStatsCommand,
-		operatorId,
-		false,
-	);
-	const lottoStats = ltlIface.decodeFunctionResult('getLottoStats', lottoStatsResponse);
+	const lottoStats = await queryContract(env, contractId, ltlIface, 'getLottoStats', [], operatorId);
 
 	const currentJackpot = Number(lottoStats[0]) / (10 ** lazyTokenDecimals);
 	const maxJackpot = Number(lottoStats[7]) / (10 ** lazyTokenDecimals);
@@ -150,13 +103,13 @@ async function main() {
 	console.log('             Boost Jackpot Pool');
 	console.log('═══════════════════════════════════════════════════════════\n');
 
-	console.log('💰 Current Jackpot:', currentJackpot.toLocaleString(), '$LAZY');
-	console.log('🎰 Maximum Cap:', maxJackpot.toLocaleString(), '$LAZY');
-	console.log('📈 Boost Amount:', boostAmount.toLocaleString(), '$LAZY');
-	console.log('✨ New Jackpot:', (currentJackpot + boostAmount).toLocaleString(), '$LAZY');
+	console.log('Current Jackpot:', currentJackpot.toLocaleString(), '$LAZY');
+	console.log('Maximum Cap:', maxJackpot.toLocaleString(), '$LAZY');
+	console.log('Boost Amount:', boostAmount.toLocaleString(), '$LAZY');
+	console.log('New Jackpot:', (currentJackpot + boostAmount).toLocaleString(), '$LAZY');
 
 	if ((currentJackpot + boostAmount) > maxJackpot) {
-		console.log('\n⚠️  WARNING: New jackpot will exceed maximum cap!');
+		console.log('\nWARNING: New jackpot will exceed maximum cap!');
 		console.log(`   The jackpot will be capped at ${maxJackpot.toLocaleString()} $LAZY`);
 	}
 
@@ -190,15 +143,15 @@ async function main() {
 	});
 
 	if (!result.success) {
-		console.log('❌ Error boosting jackpot:', result.error);
+		console.log('Error boosting jackpot:', result.error);
 		return;
 	}
 
-	console.log('\n✅ Jackpot boosted successfully!');
+	console.log('\nJackpot boosted successfully!');
 	const txId = result.receipt?.transactionId?.toString() || result.record?.transactionId?.toString() || 'N/A';
-	console.log('📋 Transaction ID:', txId);
-	console.log(`💰 New jackpot: ~${(currentJackpot + boostAmount).toLocaleString()} $LAZY`);
-	console.log('\n💡 Tip: Use queries/getLottoInfo.js to verify the new jackpot amount.\n');
+	console.log('Transaction ID:', txId);
+	console.log(`New jackpot: ~${(currentJackpot + boostAmount).toLocaleString()} $LAZY`);
+	console.log('\nTip: Use queries/getLottoInfo.js to verify the new jackpot amount.\n');
 }
 
 main()

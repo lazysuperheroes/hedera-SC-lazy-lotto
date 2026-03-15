@@ -7,39 +7,19 @@
  * Usage: node scripts/interactions/LazyLotto/user/redeemEntriesToNFT.js [poolId] [quantity]
  */
 
+require('dotenv').config();
 const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
 	TokenId,
 } = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const { associateTokensToAccount } = require('../../../../utils/hederaHelpers');
-require('dotenv').config();
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
 
 // Helper: Convert EVM address to Hedera ID
 async function convertToHederaId(evmAddress) {
@@ -69,24 +49,8 @@ async function redeemEntriesToNFT() {
 			process.exit(1);
 		}
 
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║        LazyLotto Redeem Entries to NFT Tickets            ║');
@@ -96,28 +60,17 @@ async function redeemEntriesToNFT() {
 		console.log(`🎰 Pool: #${poolId}\n`);
 
 		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
+		const lazyLottoIface = loadInterface('LazyLotto');
 
 		// Import helpers
-		const { contractExecuteFunction, readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
+		const { contractExecuteFunction } = require('../../../../utils/solidityHelpers');
 		const { estimateGas } = require('../../../../utils/gasHelpers');
 
 		console.log('🔍 Checking your entries...');
 
 		// Get user's entries
 		const userEvmAddress = operatorId.toSolidityAddress();
-		let encodedCommand = lazyLottoIface.encodeFunctionData('getUsersEntries', [poolId, userEvmAddress]);
-		let result = await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			encodedCommand,
-			operatorId,
-			false,
-		);
-		const entriesResult = lazyLottoIface.decodeFunctionResult('getUsersEntries', result);
+		const entriesResult = await queryContract(env, contractId, lazyLottoIface, 'getUsersEntries', [poolId, userEvmAddress], operatorId);
 		const entries = entriesResult[0];
 
 		const totalEntries = Number(entries);
@@ -130,16 +83,8 @@ async function redeemEntriesToNFT() {
 		console.log(`✅ You have ${totalEntries} memory entries in pool #${poolId}\n`);
 
 		// Get pool details
-		encodedCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [poolId]);
-		result = await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			encodedCommand,
-			operatorId,
-			false,
-		);
-		const [ticketCID, winCID, winRate, entryFee, prizeCount, outstanding, poolTokenId, paused, closed, feeToken] =
-			lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', result);
+		const poolInfo = await queryContract(env, contractId, lazyLottoIface, 'getPoolBasicInfo', [poolId], operatorId);
+		const poolTokenId = poolInfo[6];
 
 		const poolTokenHederaId = await convertToHederaId(poolTokenId);
 		console.log('Pool Token:', poolTokenHederaId);
@@ -149,24 +94,24 @@ async function redeemEntriesToNFT() {
 		const userBalance = await checkMirrorBalance(env, operatorId, poolTokenHederaId);
 
 		if (userBalance === null) {
-			console.log(`🔗 Associating pool NFT token...`);
-			const result = await associateTokensToAccount(
+			console.log('🔗 Associating pool NFT token...');
+			const assocResult = await associateTokensToAccount(
 				client,
 				operatorId,
 				operatorKey,
 				[TokenId.fromString(poolTokenHederaId)],
 			);
 
-			if (result !== 'SUCCESS') {
+			if (assocResult !== 'SUCCESS') {
 				console.error('❌ Failed to associate pool token');
 				process.exit(1);
 			}
-			console.log(`✅ Pool token associated`);
+			console.log('✅ Pool token associated');
 			console.log('⏳ Waiting 5 seconds for mirror node to sync...');
 			await new Promise(resolve => setTimeout(resolve, 5000));
 		}
 		else {
-			console.log(`✅ Pool token already associated`);
+			console.log('✅ Pool token already associated');
 		}
 		console.log('');
 
@@ -202,8 +147,8 @@ async function redeemEntriesToNFT() {
 		console.log(`⛽ Estimated gas: ${gasEstimate} (with 20% buffer: ${gasLimit})\n`);
 
 		// Confirm
-		const confirm = await prompt('Proceed with redemption? (yes/no): ');
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt('Proceed with redemption? (yes/no): ');
+		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Redemption cancelled');
 			process.exit(0);
 		}
@@ -211,7 +156,7 @@ async function redeemEntriesToNFT() {
 		// Execute the redemption
 		console.log('\n🔄 Redeeming entries to NFT tickets...');
 
-		const [receipt, results, record] = await contractExecuteFunction(
+		const [receipt, , record] = await contractExecuteFunction(
 			contractId,
 			lazyLottoIface,
 			client,

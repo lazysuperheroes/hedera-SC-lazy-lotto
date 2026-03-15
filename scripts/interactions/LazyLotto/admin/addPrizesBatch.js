@@ -1,15 +1,15 @@
 const fs = require('fs').promises;
-const readline = require('readline');
 const {
-	Client,
-	AccountId,
-	PrivateKey,
 	ContractId,
 	TokenId,
 	Hbar,
 	HbarUnit,
 } = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
+require('dotenv').config();
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const { setNFTAllowanceAll, setFTAllowance } = require('../../../../utils/hederaHelpers');
 const {
 	homebrewPopulateAccountNum,
@@ -21,12 +21,12 @@ const {
 } = require('../../../../utils/hederaMirrorHelpers');
 const { getArgFlag, getArg, sleep } = require('../../../../utils/nodeHelpers');
 const { checkMirrorHbarBalance, getSerialsOwned } = require('../../../../utils/hederaMirrorHelpers');
+const { estimateGas } = require('../../../../utils/gasHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
 	displayMultiSigBanner,
 } = require('../../../../utils/scriptHelpers');
-require('dotenv').config();
 
 // Helper: Convert Hedera ID to EVM address (matches addPrizePackage.js)
 function convertToEvmAddress(hederaId) {
@@ -40,21 +40,6 @@ async function convertToHederaId(evmAddress, entityType = null) {
 	if (!evmAddress.startsWith('0x')) return evmAddress;
 	if (evmAddress === '0x0000000000000000000000000000000000000000') return 'HBAR';
 	return await homebrewPopulateAccountNum(process.env.ENVIRONMENT ?? 'testnet', evmAddress, entityType);
-}
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
 }
 
 /**
@@ -106,20 +91,12 @@ const main = async () => {
 		process.exit(0);
 	}
 	// Load required environment variables
-	const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-	const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-	const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
+	const { operatorId, operatorKey, env } = getEnvConfig();
+	const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
 	const storageId = process.env.LAZY_LOTTO_STORAGE;
-	const env = process.env.ENVIRONMENT ?? 'testnet';
 
-	// Validate environment
-	if (!process.env.ACCOUNT_ID || !process.env.PRIVATE_KEY) {
-		console.error('❌ Missing ACCOUNT_ID or PRIVATE_KEY in .env');
-		process.exit(1);
-	}
-
-	if (!process.env.LAZY_LOTTO_CONTRACT_ID || !storageId) {
-		console.error('❌ Missing LAZY_LOTTO_CONTRACT_ID or LAZY_LOTTO_STORAGE in .env');
+	if (!storageId) {
+		console.error('❌ Missing LAZY_LOTTO_STORAGE in .env');
 		process.exit(1);
 	}
 
@@ -176,25 +153,8 @@ const main = async () => {
 	console.log(`🎯 Pool ID: ${config.poolId}`);
 	console.log(`📦 Prize Packages: ${config.packages.length}\n`);
 
-	// Normalize environment name
-	const envUpper = env.toUpperCase();
-
 	// Initialize client
-	let client;
-	if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-		client = Client.forMainnet();
-	}
-	else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-		client = Client.forTestnet();
-	}
-	else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-		client = Client.forPreviewnet();
-	}
-	else {
-		throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-	}
-
-	client.setOperator(operatorId, operatorKey);
+	const client = createClient(env, operatorId, operatorKey);
 
 	// Display multi-sig status if enabled
 	displayMultiSigBanner();
@@ -276,13 +236,13 @@ const main = async () => {
 				// Check FT balance
 				const ftBalance = await checkMirrorBalance(env, operatorId, tokenIdHedera);
 				const hasEnough = ftBalance !== null && ftBalance >= amount;
-				const status = hasEnough ? '✅' : '⚠️';
+				const statusIcon = hasEnough ? '✅' : '⚠️';
 
 				// Store as EVM address for contract call
 				processedPkg.ftToken = convertToEvmAddress(tokenIdHedera);
 				processedPkg.ftAmount = amount.toString();
 
-				console.log(`   ${status} FT: ${pkg.ft.amount} ${tokenDetails.symbol} (${tokenIdHedera})`);
+				console.log(`   ${statusIcon} FT: ${pkg.ft.amount} ${tokenDetails.symbol} (${tokenIdHedera})`);
 				console.log(`      Name: ${tokenDetails.name}`);
 				console.log(`      Base units: ${amount}`);
 				if (ftBalance !== null) {
@@ -331,7 +291,7 @@ const main = async () => {
 						return { serial, owned };
 					});
 
-					const status = allOwned ? '✅' : '⚠️';
+					const statusIcon = allOwned ? '✅' : '⚠️';
 
 					// Store as EVM address for contract call
 					const tokenEvmAddr = convertToEvmAddress(tokenIdHedera);
@@ -340,7 +300,7 @@ const main = async () => {
 					processedPkg.nftSerials.push(serials);
 					allNftTokens.add(tokenIdHedera);
 
-					console.log(`   ${status} NFT: ${tokenIdHedera}`);
+					console.log(`   ${statusIcon} NFT: ${tokenIdHedera}`);
 					console.log(`      Name: ${tokenDetails.name || 'Unknown'}`);
 					console.log(`      Symbol: ${tokenDetails.symbol || tokenIdHedera}`);
 					console.log(`      Serials: ${serials.map((s, i) => {
@@ -394,21 +354,11 @@ const main = async () => {
 
 	// Summary
 	// Load contract ABIs for LazyLotto and error decoding
-	const contractJson = JSON.parse(
-		require('fs').readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-	);
-	const iface = new ethers.Interface(contractJson.abi);
+	const iface = loadInterface('LazyLotto');
 
 	// Load additional interfaces for error decoding
-	const lazyGasStationJson = JSON.parse(
-		require('fs').readFileSync('./artifacts/contracts/LazyGasStation.sol/LazyGasStation.json'),
-	);
-	const lazyGasStationIface = new ethers.Interface(lazyGasStationJson.abi);
-
-	const lazyLottoStorageJson = JSON.parse(
-		require('fs').readFileSync('./artifacts/contracts/LazyLottoStorage.sol/LazyLottoStorage.json'),
-	);
-	const lazyLottoStorageIface = new ethers.Interface(lazyLottoStorageJson.abi);
+	const lazyGasStationIface = loadInterface('LazyGasStation');
+	const lazyLottoStorageIface = loadInterface('LazyLottoStorage');
 
 	// Set global error interfaces for contractExecuteFunction to use
 	global.errorInterfaces = [iface, lazyGasStationIface, lazyLottoStorageIface];
@@ -469,17 +419,12 @@ const main = async () => {
 
 	// Get LAZY token and storage contract addresses for FT allowances
 	console.log('🔍 Fetching contract dependencies...');
-	const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
 
-	let encodedCommand = iface.encodeFunctionData('lazyToken');
-	let result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-	const lazyTokenAddrResult = iface.decodeFunctionResult('lazyToken', result);
+	const lazyTokenAddrResult = await queryContract(env, contractId, iface, 'lazyToken', [], operatorId);
 	const lazyTokenAddr = lazyTokenAddrResult[0];
 	const lazyTokenId = await convertToHederaId(lazyTokenAddr, EntityType.TOKEN);
 
-	encodedCommand = iface.encodeFunctionData('lazyGasStation');
-	result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-	const lazyGasStationAddrResult = iface.decodeFunctionResult('lazyGasStation', result);
+	const lazyGasStationAddrResult = await queryContract(env, contractId, iface, 'lazyGasStation', [], operatorId);
 	const lazyGasStationAddr = lazyGasStationAddrResult[0];
 	const lazyGasStationId = await convertToHederaId(lazyGasStationAddr, EntityType.CONTRACT);
 
@@ -559,7 +504,7 @@ const main = async () => {
 		try {
 			const allowanceInPlace = await getNFTApprovedForAllAllowances(env, operatorId);
 			const storageIdString = ContractId.fromString(storageId).toString();
-			const spenderAllowances = allowanceInPlace[storageIdString] || [];
+			const spenderAllowances = allowanceInPlace.get(storageIdString) || [];
 
 			const nftTokenIdList = uniqueNftTokens
 				.filter(tokenId => !spenderAllowances.includes(tokenId))
@@ -592,8 +537,8 @@ const main = async () => {
 
 	// Confirmation prompt before submission (only in live mode)
 	if (!dryRun) {
-		const confirm = await prompt('\n⚠️  Proceed with submitting packages to the contract? (yes/no): ');
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt('\n⚠️  Proceed with submitting packages to the contract? (yes/no): ');
+		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Operation cancelled by user');
 			process.exit(0);
 		}
@@ -638,20 +583,31 @@ const main = async () => {
 
 		// Estimate gas for this package
 		try {
-			// Calculate gas with association buffer
-			const baseGas = 800000;
-			const finalGasLimit = baseGas + tokenAssociationGas;
-
-			console.log(`   ⛽ Gas Estimate: ${finalGasLimit.toLocaleString()}`);
-			if (tokenAssociationGas > 0) {
-				console.log(`   💡 (Includes +${tokenAssociationGas.toLocaleString()} for ${(tokenAssociationGas / 1_000_000)} token association(s))`);
-			}
-
 			// Calculate payable amount (HBAR if ftToken is 0x0000...)
 			const payableAmount = pkg.ftToken === '0x0000000000000000000000000000000000000000' ? pkg.ftAmount : '0';
+			const payableInTinybars = Number(payableAmount);
 
-			// Execute using the working pattern from addPrizePackage.js
-			const gasLimit = Math.floor(finalGasLimit * 1.2);
+			// Use mirror node gas estimation with smart fallback
+			// Fallback scales by NFT count + collections (each transfer ~50K, each collection ~100K overhead)
+			const totalNfts = pkg.nftSerials.reduce((sum, s) => sum + s.length, 0);
+			const nftCollections = pkg.nftTokens.length;
+			const fallbackGas = Math.max(800000, 400000 + (totalNfts * 50000) + (nftCollections * 100000)) + tokenAssociationGas;
+			const gasInfo = await estimateGas(
+				env,
+				contractId,
+				iface,
+				operatorId,
+				'addPrizePackage',
+				[config.poolId, pkg.ftToken, pkg.ftAmount, pkg.nftTokens, pkg.nftSerials],
+				fallbackGas,
+				payableInTinybars,
+			);
+
+			// Add association gas on top of estimated gas (estimation doesn't account for first-time associations)
+			const gasLimit = gasInfo.gasLimit + tokenAssociationGas;
+			if (tokenAssociationGas > 0) {
+				console.log(`   💡 (+ ${tokenAssociationGas.toLocaleString()} for ${(tokenAssociationGas / 1_000_000)} token association(s))`);
+			}
 
 			const executionResult = await executeContractFunction({
 				contractId: contractId,
@@ -660,7 +616,7 @@ const main = async () => {
 				functionName: 'addPrizePackage',
 				params: [config.poolId, pkg.ftToken, pkg.ftAmount, pkg.nftTokens, pkg.nftSerials],
 				gas: gasLimit,
-				payableAmount: new Hbar(payableAmount, HbarUnit.Tinybar).toTinybars().toString(),
+				payableAmount: new Hbar(payableAmount, HbarUnit.Tinybar),
 			});
 
 			if (!executionResult.success) {

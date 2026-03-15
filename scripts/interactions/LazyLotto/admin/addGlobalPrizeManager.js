@@ -17,17 +17,14 @@
  *   --signers=Alice,Bob,Charlie     Label signers for clarity
  */
 
-const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
-} = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
 require('dotenv').config();
-
+const { AccountId, ContractId } = require('@hashgraph/sdk');
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
+const { homebrewPopulateAccountNum, EntityType } = require('../../../../utils/hederaMirrorHelpers');
+const { estimateGas } = require('../../../../utils/gasHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
@@ -35,25 +32,8 @@ const {
 } = require('../../../../utils/scriptHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const poolManagerId = ContractId.fromString(process.env.LAZY_LOTTO_POOL_MANAGER_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const poolManagerId = getContractId('LAZY_LOTTO_POOL_MANAGER_ID');
 
 // Helper: Sleep
 function sleep(ms) {
@@ -80,24 +60,8 @@ async function addGlobalPrizeManager() {
 			}
 		}
 
-		// Normalize environment name
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║         LazyLotto Add Global Prize Manager (Admin)        ║');
@@ -109,22 +73,25 @@ async function addGlobalPrizeManager() {
 		displayMultiSigBanner();
 
 		// Load PoolManager ABI
-		const poolManagerJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLottoPoolManager.sol/LazyLottoPoolManager.json'),
-		);
-		const poolManagerIface = new ethers.Interface(poolManagerJson.abi);
+		const poolManagerIface = loadInterface('LazyLottoPoolManager');
 
-		const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
-		const { estimateGas } = require('../../../../utils/gasHelpers');
+		// Resolve LazyLotto address from PoolManager
+		console.log('🔍 Resolving LazyLotto contract from PoolManager...\n');
+		const lazyLottoAddrResult = await queryContract(env, poolManagerId, poolManagerIface, 'lazyLotto', [], operatorId);
+		const lazyLottoAddr = lazyLottoAddrResult[0];
+		const lazyLottoHederaId = await homebrewPopulateAccountNum(env, lazyLottoAddr, EntityType.CONTRACT);
+		const lazyLottoId = ContractId.fromString(lazyLottoHederaId);
 
-		// Check if operator is admin
+		// Load LazyLotto ABI for isAdmin check
+		const lazyLottoIface = loadInterface('LazyLotto');
+
+		// Check if operator is admin via LazyLotto
 		console.log('🔍 Verifying admin permissions...\n');
-		let encodedCommand = poolManagerIface.encodeFunctionData('isAdmin', [operatorId.toSolidityAddress()]);
-		let result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const isAdmin = poolManagerIface.decodeFunctionResult('isAdmin', result)[0];
+		const isAdminResult = await queryContract(env, lazyLottoId, lazyLottoIface, 'isAdmin', [operatorId.toSolidityAddress()], operatorId);
+		const isAdmin = isAdminResult[0];
 
 		if (!isAdmin) {
-			console.error('❌ You are not an admin of the PoolManager contract');
+			console.error('❌ You are not an admin of the LazyLotto contract');
 			process.exit(1);
 		}
 
@@ -149,9 +116,8 @@ async function addGlobalPrizeManager() {
 
 		// Check if already a manager
 		console.log('🔍 Checking if already a global prize manager...\n');
-		encodedCommand = poolManagerIface.encodeFunctionData('isGlobalPrizeManager', [managerAddress]);
-		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const isAlreadyManager = poolManagerIface.decodeFunctionResult('isGlobalPrizeManager', result)[0];
+		const isAlreadyManagerResult = await queryContract(env, poolManagerId, poolManagerIface, 'isGlobalPrizeManager', [managerAddress], operatorId);
+		const isAlreadyManager = isAlreadyManagerResult[0];
 
 		if (isAlreadyManager) {
 			console.log('⚠️  This account is already a global prize manager');
@@ -225,9 +191,8 @@ async function addGlobalPrizeManager() {
 
 		// Verify manager status
 		console.log('🔍 Verifying manager status...\n');
-		encodedCommand = poolManagerIface.encodeFunctionData('isGlobalPrizeManager', [managerAddress]);
-		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const verifyManager = poolManagerIface.decodeFunctionResult('isGlobalPrizeManager', result)[0];
+		const verifyResult = await queryContract(env, poolManagerId, poolManagerIface, 'isGlobalPrizeManager', [managerAddress], operatorId);
+		const verifyManager = verifyResult[0];
 
 		if (verifyManager) {
 			console.log('✅ Manager status verified!\n');

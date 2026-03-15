@@ -1,8 +1,7 @@
 require('dotenv').config();
+const { loadInterface } = require('../../../utils/abiLoader');
 const { getArgFlag } = require('../../../utils/nodeHelpers');
 const { translateTransactionForWebCall, getContractResult } = require('../../../utils/hederaMirrorHelpers');
-const fs = require('fs');
-const { ethers } = require('ethers');
 
 const env = process.env.ENVIRONMENT ?? null;
 
@@ -21,16 +20,10 @@ const main = async () => {
 	const txId = args[1];
 	const txIdParsed = translateTransactionForWebCall(txId);
 
-	// import ABI
-	const contractJSON = JSON.parse(
-		fs.readFileSync(
-			`./artifacts/contracts/${contractName}.sol/${contractName}.json`,
-		),
-	);
+	// Import ABI
+	const contractIface = loadInterface(contractName);
 
-	const contractIface = new ethers.Interface(contractJSON.abi);
-
-	console.log('\n-Using ENIVRONMENT:', env);
+	console.log('\n-Using ENVIRONMENT:', env);
 	console.log('\n-Checking Transaction:', txId);
 	console.log('\n-Parsed Transaction:', txIdParsed);
 	console.log('\n-Using Contract Name:', contractName);

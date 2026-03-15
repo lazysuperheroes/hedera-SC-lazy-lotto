@@ -1,60 +1,22 @@
 const {
-	Client,
-	AccountId,
-	PrivateKey,
 	ContractFunctionParameters,
 	TokenId,
 	ContractId,
 } = require('@hashgraph/sdk');
 const fs = require('fs');
 const path = require('path');
-const readline = require('readline');
-const { contractDeployFunction } = require('../../utils/solidityHelpers');
-const { parseTransactionRecord } = require('../../utils/transactionHelpers');
-
-require('dotenv').config();
-
-const env = process.env.ENVIRONMENT ?? 'test';
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { contractDeployFunction } = require('../../../utils/solidityHelpers');
+const { parseTransactionRecord } = require('../../../utils/transactionHelpers');
+const { getEnvConfig, createClient } = require('../../../utils/clientFactory');
+const { prompt } = require('../../../utils/promptHelpers');
 
 async function main() {
 	console.log('\n=== Deploying LazyLottoPoolManager ===\n');
+
+	const { operatorId, operatorKey, env } = getEnvConfig();
+	const client = createClient(env, operatorId, operatorKey);
+
 	console.log('Environment:', env.toUpperCase());
-
-	// Setup client
-	const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-	const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-
-	let client;
-	if (env.toUpperCase() == 'TEST' || env.toUpperCase() == 'TESTNET') {
-		client = Client.forTestnet();
-	}
-	else if (env.toUpperCase() == 'MAIN' || env.toUpperCase() == 'MAINNET') {
-		client = Client.forMainnet();
-	}
-	else if (env.toUpperCase() == 'PREVIEW' || env.toUpperCase() == 'PREVIEWNET') {
-		client = Client.forPreviewnet();
-	}
-	else if (env.toUpperCase() == 'LOCAL') {
-		const node = { '127.0.0.1:50211': new AccountId(3) };
-		client = Client.forNetwork(node).setMirrorNetwork('127.0.0.1:5600');
-	}
-
-	client.setOperator(operatorId, operatorKey);
 	console.log('Using Operator:', operatorId.toString());
 
 	// Verify required environment variables

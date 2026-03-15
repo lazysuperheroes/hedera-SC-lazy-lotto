@@ -34,23 +34,21 @@
  */
 
 const fs = require('fs');
-const readline = require('readline');
 const {
-	Client,
 	AccountId,
-	PrivateKey,
 	ContractId,
 	TokenId,
 	ContractFunctionParameters,
 	TransferTransaction,
 } = require('@hashgraph/sdk');
-const { contractDeployFunction, contractExecuteFunction, readOnlyEVMFromMirrorNode } = require('../../../utils/solidityHelpers');
+const { contractDeployFunction, contractExecuteFunction } = require('../../../utils/solidityHelpers');
 const { estimateGas } = require('../../../utils/gasHelpers');
 const { parseTransactionRecord } = require('../../../utils/transactionHelpers');
 const { ethers } = require('ethers');
-
-// Load environment variables
-require('dotenv').config();
+const { getEnvConfig, createClient } = require('../../../utils/clientFactory');
+const { loadInterface } = require('../../../utils/abiLoader');
+const { queryContract } = require('../../../utils/queryHelpers');
+const { prompt } = require('../../../utils/promptHelpers');
 
 // Configuration
 const contractName = process.env.CONTRACT_NAME ?? 'LazyLotto';
@@ -61,10 +59,10 @@ const lazyDelegateRegistryName = 'LazyDelegateRegistry';
 const prngContractName = 'PrngSystemContract';
 const lazyContractCreator = 'LAZYTokenCreator';
 
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'TEST';
 const verifyOnly = process.env.VERIFY_ONLY === 'true';
+
+// Operator and environment (set during initializeClient)
+let operatorId, operatorKey, env;
 
 // Track deployed contracts
 const deployedContracts = {
@@ -102,61 +100,27 @@ function saveDeploymentAddresses() {
 	console.log(`\n✅ Deployment addresses saved to: ${filepath}`);
 }
 
-// Utility: Prompt user for input
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
-
 // Step 1: Initialize client
 async function initializeClient() {
 	console.log('\n🚀 LazyLotto Deployment Script');
 	console.log('=====================================\n');
 
-	if (!operatorId || !operatorKey) {
-		console.error('❌ Error: ACCOUNT_ID and PRIVATE_KEY must be set in .env');
-		process.exit(1);
-	}
+	const config = getEnvConfig();
+	operatorId = config.operatorId;
+	operatorKey = config.operatorKey;
+	env = config.env;
 
 	console.log(`📍 Environment: ${env.toUpperCase()}`);
 
-	if (env.toUpperCase() === 'TEST' || env.toUpperCase() === 'TESTNET') {
-		client = Client.forTestnet();
-		console.log('   Network: TESTNET');
-	}
-	else if (env.toUpperCase() === 'MAIN' || env.toUpperCase() === 'MAINNET') {
-		client = Client.forMainnet();
-		console.log('   Network: MAINNET');
-		const confirm = await prompt('⚠️  WARNING: You are deploying to MAINNET. Type "MAINNET" to confirm: ');
-		if (confirm !== 'MAINNET') {
+	if (env.toUpperCase() === 'MAIN' || env.toUpperCase() === 'MAINNET') {
+		const confirmInput = await prompt('⚠️  WARNING: You are deploying to MAINNET. Type "MAINNET" to confirm: ');
+		if (confirmInput !== 'MAINNET') {
 			console.log('❌ Deployment cancelled.');
 			process.exit(0);
 		}
 	}
-	else if (env.toUpperCase() === 'PREVIEW' || env.toUpperCase() === 'PREVIEWNET') {
-		client = Client.forPreviewnet();
-		console.log('   Network: PREVIEWNET');
-	}
-	else if (env.toUpperCase() === 'LOCAL') {
-		const node = { '127.0.0.1:50211': new AccountId(3) };
-		client = Client.forNetwork(node).setMirrorNetwork('127.0.0.1:5600');
-		console.log('   Network: LOCAL');
-	}
-	else {
-		console.error(`❌ Unknown environment: ${env}`);
-		process.exit(1);
-	}
 
-	client.setOperator(operatorId, operatorKey);
+	client = createClient(env, operatorId, operatorKey);
 	console.log(`👤 Operator: ${operatorId.toString()}\n`);
 
 	// Show current .env configuration
@@ -190,8 +154,8 @@ async function deployLazyToken() {
 
 		// Query token info from mirror node to display to user
 		try {
-			const { checkMirrorTokenInfo } = require('../../../utils/hederaMirrorHelpers');
-			const tokenInfo = await checkMirrorTokenInfo(env, deployedContracts.lazyToken);
+			const { getTokenDetails } = require('../../../utils/hederaMirrorHelpers');
+			const tokenInfo = await getTokenDetails(env, deployedContracts.lazyToken);
 			if (tokenInfo) {
 				console.log(`   Name: ${tokenInfo.name}`);
 				console.log(`   Symbol: ${tokenInfo.symbol}`);
@@ -424,12 +388,7 @@ async function deployLazyGasStation() {
 	}
 
 	// Load interface
-	const lazyGasStationJson = JSON.parse(
-		fs.readFileSync(
-			`./artifacts/contracts/${lazyGasStationName}.sol/${lazyGasStationName}.json`,
-		),
-	);
-	lazyGasStationIface = new ethers.Interface(lazyGasStationJson.abi);
+	lazyGasStationIface = loadInterface(lazyGasStationName);
 }
 
 // Step 4: Deploy LazyDelegateRegistry
@@ -576,9 +535,7 @@ async function deployLazyLottoStorage() {
 	}
 
 	// Load interface
-	lazyLottoStorageIface = new ethers.Interface(JSON.parse(
-		fs.readFileSync(`./artifacts/contracts/${storageContractName}.sol/${storageContractName}.json`),
-	).abi);
+	lazyLottoStorageIface = loadInterface(storageContractName);
 }
 
 // Step 7: Deploy LazyLotto
@@ -668,15 +625,7 @@ async function setContractUser() {
 	console.log('-------------------------------------------');
 
 	// Check if already set
-	const encodedCommand = lazyLottoStorageIface.encodeFunctionData('getContractUser');
-	const result = await readOnlyEVMFromMirrorNode(
-		env,
-		deployedContracts.lazyLottoStorage,
-		encodedCommand,
-		operatorId,
-		false,
-	);
-	const currentContractUser = lazyLottoStorageIface.decodeFunctionResult('getContractUser', result);
+	const currentContractUser = await queryContract(env, deployedContracts.lazyLottoStorage, lazyLottoStorageIface, 'getContractUser', [], operatorId);
 
 	if (currentContractUser[0].toLowerCase() === deployedContracts.lazyLotto.toSolidityAddress()) {
 		console.log('✅ LazyLotto is already set as contract user on storage');
@@ -888,12 +837,7 @@ async function deployPoolManager() {
 	}
 
 	// Load interface
-	const poolManagerJson = JSON.parse(
-		fs.readFileSync(
-			`./artifacts/contracts/${poolManagerContractName}.sol/${poolManagerContractName}.json`,
-		),
-	);
-	poolManagerIface = new ethers.Interface(poolManagerJson.abi);
+	poolManagerIface = loadInterface(poolManagerContractName);
 }
 
 // Step 11: Link LazyLotto and LazyLottoPoolManager (bidirectional)
@@ -960,13 +904,9 @@ async function linkPoolManager() {
 	// Verify bidirectional linkage
 	console.log('\n🔍 Verifying bidirectional linkage...');
 
-	let encodedCommand = lazyLottoIface.encodeFunctionData('poolManager');
-	let result = await readOnlyEVMFromMirrorNode(env, deployedContracts.lazyLotto, encodedCommand, operatorId, false);
-	const poolManagerFromLazyLotto = lazyLottoIface.decodeFunctionResult('poolManager', result);
+	const poolManagerFromLazyLotto = await queryContract(env, deployedContracts.lazyLotto, lazyLottoIface, 'poolManager', [], operatorId);
 
-	encodedCommand = poolManagerIface.encodeFunctionData('lazyLotto');
-	result = await readOnlyEVMFromMirrorNode(env, deployedContracts.poolManager, encodedCommand, operatorId, false);
-	const lazyLottoFromPoolManager = poolManagerIface.decodeFunctionResult('lazyLotto', result);
+	const lazyLottoFromPoolManager = await queryContract(env, deployedContracts.poolManager, poolManagerIface, 'lazyLotto', [], operatorId);
 
 	const poolManagerMatch = poolManagerFromLazyLotto[0].slice(2).toLowerCase() === deployedContracts.poolManager.toSolidityAddress();
 	const lazyLottoMatch = lazyLottoFromPoolManager[0].slice(2).toLowerCase() === deployedContracts.lazyLotto.toSolidityAddress();
@@ -990,31 +930,23 @@ async function verifyDeployment() {
 	// Verify LazyLotto immutable variables
 	console.log('🔍 Verifying LazyLotto configuration...');
 
-	let encodedCommand = lazyLottoIface.encodeFunctionData('lazyToken');
-	let result = await readOnlyEVMFromMirrorNode(env, deployedContracts.lazyLotto, encodedCommand, operatorId, false);
-	const lazyTokenAddr = lazyLottoIface.decodeFunctionResult('lazyToken', result);
+	const lazyTokenAddr = await queryContract(env, deployedContracts.lazyLotto, lazyLottoIface, 'lazyToken', [], operatorId);
 	const lazyTokenMatch = lazyTokenAddr[0].slice(2).toLowerCase() === deployedContracts.lazyToken.toSolidityAddress();
 
 	console.log(`   lazyToken: ${lazyTokenMatch ? '✅' : '❌'} ${deployedContracts.lazyToken.toString()}`);
 
-	encodedCommand = lazyLottoIface.encodeFunctionData('lazyGasStation');
-	result = await readOnlyEVMFromMirrorNode(env, deployedContracts.lazyLotto, encodedCommand, operatorId, false);
-	const lazyGasStationAddr = lazyLottoIface.decodeFunctionResult('lazyGasStation', result);
+	const lazyGasStationAddr = await queryContract(env, deployedContracts.lazyLotto, lazyLottoIface, 'lazyGasStation', [], operatorId);
 	const lazyGasStationMatch = lazyGasStationAddr[0].slice(2).toLowerCase() === deployedContracts.lazyGasStation.toSolidityAddress();
 
 	console.log(`   lazyGasStation: ${lazyGasStationMatch ? '✅' : '❌'} ${deployedContracts.lazyGasStation.toString()}`);
 
-	encodedCommand = lazyLottoIface.encodeFunctionData('storageContract');
-	result = await readOnlyEVMFromMirrorNode(env, deployedContracts.lazyLotto, encodedCommand, operatorId, false);
-	const storageAddr = lazyLottoIface.decodeFunctionResult('storageContract', result);
+	const storageAddr = await queryContract(env, deployedContracts.lazyLotto, lazyLottoIface, 'storageContract', [], operatorId);
 	const storageMatch = storageAddr[0].slice(2).toLowerCase() === deployedContracts.lazyLottoStorage.toSolidityAddress();
 
 	console.log(`   storageContract: ${storageMatch ? '✅' : '❌'} ${deployedContracts.lazyLottoStorage.toString()}`);
 
 	// Verify admin
-	encodedCommand = lazyLottoIface.encodeFunctionData('isAdmin', [operatorId.toSolidityAddress()]);
-	result = await readOnlyEVMFromMirrorNode(env, deployedContracts.lazyLotto, encodedCommand, operatorId, false);
-	const isAdmin = lazyLottoIface.decodeFunctionResult('isAdmin', result);
+	const isAdmin = await queryContract(env, deployedContracts.lazyLotto, lazyLottoIface, 'isAdmin', [operatorId.toSolidityAddress()], operatorId);
 
 	console.log(`   Deployer is admin: ${isAdmin[0] ? '✅' : '❌'}`);
 
@@ -1022,14 +954,10 @@ async function verifyDeployment() {
 	if (deployedContracts.poolManager) {
 		console.log('\n🔍 Verifying LazyLottoPoolManager linkage...');
 
-		encodedCommand = lazyLottoIface.encodeFunctionData('poolManager');
-		result = await readOnlyEVMFromMirrorNode(env, deployedContracts.lazyLotto, encodedCommand, operatorId, false);
-		const poolManagerFromLazyLotto = lazyLottoIface.decodeFunctionResult('poolManager', result);
+		const poolManagerFromLazyLotto = await queryContract(env, deployedContracts.lazyLotto, lazyLottoIface, 'poolManager', [], operatorId);
 		const poolManagerFromLazyLottoMatch = poolManagerFromLazyLotto[0].slice(2).toLowerCase() === deployedContracts.poolManager.toSolidityAddress();
 
-		encodedCommand = poolManagerIface.encodeFunctionData('lazyLotto');
-		result = await readOnlyEVMFromMirrorNode(env, deployedContracts.poolManager, encodedCommand, operatorId, false);
-		const lazyLottoFromPoolManager = poolManagerIface.decodeFunctionResult('lazyLotto', result);
+		const lazyLottoFromPoolManager = await queryContract(env, deployedContracts.poolManager, poolManagerIface, 'lazyLotto', [], operatorId);
 		const lazyLottoFromPoolManagerMatch = lazyLottoFromPoolManager[0].slice(2).toLowerCase() === deployedContracts.lazyLotto.toSolidityAddress();
 
 		console.log(`   LazyLotto → PoolManager: ${poolManagerFromLazyLottoMatch ? '✅' : '❌'} ${deployedContracts.poolManager.toString()}`);
@@ -1078,14 +1006,9 @@ async function main() {
 			deployedContracts.poolManager = ContractId.fromString(process.env.LAZY_LOTTO_POOL_MANAGER_ID);
 
 			// Load interfaces for verification
-			const lazyLottoJson = JSON.parse(fs.readFileSync(`./abi/${contractName}.json`));
-			lazyLottoIface = new ethers.Interface(lazyLottoJson);
-
-			const lazyLottoStorageJson = JSON.parse(fs.readFileSync(`./abi/${storageContractName}.json`));
-			lazyLottoStorageIface = new ethers.Interface(lazyLottoStorageJson);
-
-			const poolManagerJson = JSON.parse(fs.readFileSync(`./abi/${poolManagerContractName}.json`));
-			poolManagerIface = new ethers.Interface(poolManagerJson);
+			lazyLottoIface = loadInterface(contractName);
+			lazyLottoStorageIface = loadInterface(storageContractName);
+			poolManagerIface = loadInterface(poolManagerContractName);
 
 			await verifyDeployment();
 

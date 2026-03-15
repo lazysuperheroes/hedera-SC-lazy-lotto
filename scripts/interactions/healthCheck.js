@@ -23,13 +23,12 @@ const {
 	Hbar,
 	HbarUnit,
 } = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
 require('dotenv').config();
 
-const { readOnlyEVMFromMirrorNode } = require('../../utils/solidityHelpers');
-const { getBaseURL, getAccountBalance, getTokenDetails } = require('../../utils/hederaMirrorHelpers');
+const { getBaseURL, checkMirrorHbarBalance, checkMirrorBalance } = require('../../utils/hederaMirrorHelpers');
 const axios = require('axios');
+const { loadInterface } = require('../../utils/abiLoader');
+const { queryContract } = require('../../utils/queryHelpers');
 
 // Environment setup
 const env = process.env.ENVIRONMENT ?? 'testnet';
@@ -42,7 +41,7 @@ const lazyTradeLottoId = process.env.LAZY_TRADE_LOTTO_CONTRACT_ID ? ContractId.f
 const lazyGasStationId = process.env.LAZY_GAS_STATION_CONTRACT_ID ? ContractId.fromString(process.env.LAZY_GAS_STATION_CONTRACT_ID) : null;
 const lazyDelegateRegistryId = process.env.LAZY_DELEGATE_REGISTRY_CONTRACT_ID ? ContractId.fromString(process.env.LAZY_DELEGATE_REGISTRY_CONTRACT_ID) : null;
 const lazyTokenId = process.env.LAZY_TOKEN_ID ? TokenId.fromString(process.env.LAZY_TOKEN_ID) : null;
-const lazyDecimals = parseInt(process.env.LAZY_DECIMALS ?? '8');
+const lazyDecimals = parseInt(process.env.LAZY_DECIMALS ?? '1');
 
 /**
  * Check if a contract exists on the mirror node
@@ -79,14 +78,12 @@ async function checkLazyLotto(iface) {
 		}
 
 		// Check paused status
-		let encoded = iface.encodeFunctionData('paused');
-		let data = await readOnlyEVMFromMirrorNode(env, lazyLottoId, encoded, operatorId, false);
-		const isPaused = iface.decodeFunctionResult('paused', data)[0];
+		const pausedResult = await queryContract(env, lazyLottoId, iface, 'paused', [], operatorId);
+		const isPaused = pausedResult[0];
 
 		// Get total pools
-		encoded = iface.encodeFunctionData('totalPools');
-		data = await readOnlyEVMFromMirrorNode(env, lazyLottoId, encoded, operatorId, false);
-		const totalPools = Number(iface.decodeFunctionResult('totalPools', data)[0]);
+		const poolsResult = await queryContract(env, lazyLottoId, iface, 'totalPools', [], operatorId);
+		const totalPools = Number(poolsResult[0]);
 
 		// Count outstanding entries across all pools
 		let totalOutstanding = 0;
@@ -95,9 +92,7 @@ async function checkLazyLotto(iface) {
 		let closedPools = 0;
 
 		for (let i = 0; i < totalPools; i++) {
-			encoded = iface.encodeFunctionData('getPoolBasicInfo', [i]);
-			data = await readOnlyEVMFromMirrorNode(env, lazyLottoId, encoded, operatorId, false);
-			const poolInfo = iface.decodeFunctionResult('getPoolBasicInfo', data);
+			const poolInfo = await queryContract(env, lazyLottoId, iface, 'getPoolBasicInfo', [i], operatorId);
 			// [ticketCID, winCID, winRate, entryFee, prizeCount, outstandingEntries, poolTokenId, paused, closed, feeToken]
 			const outstandingEntries = Number(poolInfo[5]);
 			const poolPaused = poolInfo[7];
@@ -155,30 +150,25 @@ async function checkLazyTradeLotto(iface) {
 		}
 
 		// Check paused status
-		let encoded = iface.encodeFunctionData('paused');
-		let data = await readOnlyEVMFromMirrorNode(env, lazyTradeLottoId, encoded, operatorId, false);
-		const isPaused = iface.decodeFunctionResult('paused', data)[0];
+		const pausedResult = await queryContract(env, lazyTradeLottoId, iface, 'paused', [], operatorId);
+		const isPaused = pausedResult[0];
 
 		// Get jackpot
-		encoded = iface.encodeFunctionData('jackpot');
-		data = await readOnlyEVMFromMirrorNode(env, lazyTradeLottoId, encoded, operatorId, false);
-		const jackpot = iface.decodeFunctionResult('jackpot', data)[0];
+		const jackpotResult = await queryContract(env, lazyTradeLottoId, iface, 'jackpotPool', [], operatorId);
+		const jackpot = jackpotResult[0];
 		const jackpotFormatted = Number(jackpot) / (10 ** lazyDecimals);
 
 		// Get total rolls
-		encoded = iface.encodeFunctionData('totalRolls');
-		data = await readOnlyEVMFromMirrorNode(env, lazyTradeLottoId, encoded, operatorId, false);
-		const totalRolls = Number(iface.decodeFunctionResult('totalRolls', data)[0]);
+		const rollsResult = await queryContract(env, lazyTradeLottoId, iface, 'totalRolls', [], operatorId);
+		const totalRolls = Number(rollsResult[0]);
 
 		// Get total wins
-		encoded = iface.encodeFunctionData('totalWins');
-		data = await readOnlyEVMFromMirrorNode(env, lazyTradeLottoId, encoded, operatorId, false);
-		const totalWins = Number(iface.decodeFunctionResult('totalWins', data)[0]);
+		const winsResult = await queryContract(env, lazyTradeLottoId, iface, 'totalWins', [], operatorId);
+		const totalWins = Number(winsResult[0]);
 
 		// Get total payout
-		encoded = iface.encodeFunctionData('totalPayout');
-		data = await readOnlyEVMFromMirrorNode(env, lazyTradeLottoId, encoded, operatorId, false);
-		const totalPayout = iface.decodeFunctionResult('totalPayout', data)[0];
+		const payoutResult = await queryContract(env, lazyTradeLottoId, iface, 'totalPaid', [], operatorId);
+		const totalPayout = payoutResult[0];
 		const totalPayoutFormatted = Number(totalPayout) / (10 ** lazyDecimals);
 
 		result.status = isPaused ? 'paused' : 'operational';
@@ -220,48 +210,42 @@ async function checkLazyGasStation() {
 			return result;
 		}
 
-		// Get account balances from mirror node
-		const balance = await getAccountBalance(env, lazyGasStationId.toString());
+		// Get HBAR balance from mirror node
+		const hbarBalance = await checkMirrorHbarBalance(env, lazyGasStationId.toString()) || 0;
+		const hbarFormatted = new Hbar(hbarBalance, HbarUnit.Tinybar);
 
-		if (balance) {
-			const hbarBalance = balance.balance || 0;
-			const hbarFormatted = new Hbar(hbarBalance, HbarUnit.Tinybar);
+		let lazyBalance = 0;
+		let lazyFormatted = 0;
 
-			let lazyBalance = 0;
-			let lazyFormatted = 0;
-
-			// Find LAZY token balance
-			if (lazyTokenId && balance.tokens) {
-				const lazyTokenEntry = balance.tokens.find(t => t.token_id === lazyTokenId.toString());
-				if (lazyTokenEntry) {
-					lazyBalance = lazyTokenEntry.balance;
-					lazyFormatted = lazyBalance / (10 ** lazyDecimals);
-				}
-			}
-
-			// Determine health status based on balances
-			const lowHbar = hbarBalance < 10_00000000; // < 10 HBAR
-			const lowLazy = lazyBalance < 1000 * (10 ** lazyDecimals); // < 1000 LAZY
-
-			result.status = (lowHbar || lowLazy) ? 'low_balance' : 'operational';
-			result.details = {
-				hbarBalance: hbarFormatted.toString(),
-				hbarTinybar: hbarBalance,
-				lazyBalance: lazyFormatted,
-				lazyRaw: lazyBalance,
-				warnings: [],
-			};
-
-			if (lowHbar) {
-				result.details.warnings.push('Low HBAR balance (< 10 HBAR)');
-			}
-			if (lowLazy) {
-				result.details.warnings.push('Low LAZY balance (< 1000 LAZY)');
+		// Get LAZY token balance
+		if (lazyTokenId) {
+			const tokenBalance = await checkMirrorBalance(env, lazyGasStationId.toString(), lazyTokenId.toString());
+			if (tokenBalance !== null) {
+				lazyBalance = tokenBalance;
+				lazyFormatted = lazyBalance / (10 ** lazyDecimals);
 			}
 		}
-		else {
-			result.status = 'error';
-			result.error = 'Could not fetch balance';
+
+		// Determine health status based on balances
+		// < 10 HBAR
+		const lowHbar = hbarBalance < 10_00000000;
+		// < 1000 LAZY
+		const lowLazy = lazyBalance < 1000 * (10 ** lazyDecimals);
+
+		result.status = (lowHbar || lowLazy) ? 'low_balance' : 'operational';
+		result.details = {
+			hbarBalance: hbarFormatted.toString(),
+			hbarTinybar: hbarBalance,
+			lazyBalance: lazyFormatted,
+			lazyRaw: lazyBalance,
+			warnings: [],
+		};
+
+		if (lowHbar) {
+			result.details.warnings.push('Low HBAR balance (< 10 HBAR)');
+		}
+		if (lowLazy) {
+			result.details.warnings.push('Low LAZY balance (< 1000 LAZY)');
 		}
 	}
 	catch (error) {
@@ -293,9 +277,8 @@ async function checkLazyDelegateRegistry(iface) {
 		}
 
 		// Get total delegations
-		const encoded = iface.encodeFunctionData('totalDelegations');
-		const data = await readOnlyEVMFromMirrorNode(env, lazyDelegateRegistryId, encoded, operatorId, false);
-		const totalDelegations = Number(iface.decodeFunctionResult('totalDelegations', data)[0]);
+		const delegationResult = await queryContract(env, lazyDelegateRegistryId, iface, 'totalSerialsDelegated', [], operatorId);
+		const totalDelegations = Number(delegationResult[0]);
 
 		result.status = 'operational';
 		result.details = {
@@ -351,8 +334,7 @@ async function runHealthCheck() {
 
 	try {
 		if (lazyLottoId) {
-			const lazyLottoJson = JSON.parse(fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'));
-			lazyLottoIface = new ethers.Interface(lazyLottoJson.abi);
+			lazyLottoIface = loadInterface('LazyLotto');
 		}
 	}
 	catch {
@@ -361,8 +343,7 @@ async function runHealthCheck() {
 
 	try {
 		if (lazyTradeLottoId) {
-			const lazyTradeLottoJson = JSON.parse(fs.readFileSync('./artifacts/contracts/LazyTradeLotto.sol/LazyTradeLotto.json'));
-			lazyTradeLottoIface = new ethers.Interface(lazyTradeLottoJson.abi);
+			lazyTradeLottoIface = loadInterface('LazyTradeLotto');
 		}
 	}
 	catch {
@@ -371,8 +352,7 @@ async function runHealthCheck() {
 
 	try {
 		if (lazyDelegateRegistryId) {
-			const lazyDelegateRegistryJson = JSON.parse(fs.readFileSync('./artifacts/contracts/LazyDelegateRegistry.sol/LazyDelegateRegistry.json'));
-			lazyDelegateRegistryIface = new ethers.Interface(lazyDelegateRegistryJson.abi);
+			lazyDelegateRegistryIface = loadInterface('LazyDelegateRegistry');
 		}
 	}
 	catch {

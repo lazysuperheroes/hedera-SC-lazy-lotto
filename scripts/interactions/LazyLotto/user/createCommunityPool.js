@@ -7,47 +7,27 @@
  * Usage: node scripts/interactions/LazyLotto/user/create-community-pool.js
  */
 
+require('dotenv').config();
 const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
 	TokenId,
 	Hbar,
 	HbarUnit,
 } = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
-require('dotenv').config();
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 
 const { checkMirrorBalance, checkMirrorHbarBalance, checkMirrorAllowance } = require('../../../../utils/hederaMirrorHelpers');
 const { setFTAllowance } = require('../../../../utils/hederaHelpers');
 const { sleep } = require('../../../../utils/nodeHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-const poolManagerId = ContractId.fromString(process.env.LAZY_LOTTO_POOL_MANAGER_ID);
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
+const poolManagerId = getContractId('LAZY_LOTTO_POOL_MANAGER_ID');
 const lazyTokenId = TokenId.fromString(process.env.LAZY_TOKEN_ID);
-const lazyGasStationId = ContractId.fromString(process.env.LAZY_GAS_STATION_CONTRACT_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const lazyGasStationId = getContractId('LAZY_GAS_STATION_CONTRACT_ID');
 
 // Helper: Format win rate
 function formatWinRate(thousandthsOfBps) {
@@ -58,24 +38,8 @@ async function createCommunityPool() {
 	let client;
 
 	try {
-		// Normalize environment name
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║         LazyLotto Create Community Pool                  ║');
@@ -85,24 +49,15 @@ async function createCommunityPool() {
 		console.log(`📄 PoolManager Contract: ${poolManagerId.toString()}\n`);
 
 		// Load contract ABIs
-		const lazyLottoJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(lazyLottoJson.abi);
+		const lazyLottoIface = loadInterface('LazyLotto');
+		const poolManagerIface = loadInterface('LazyLottoPoolManager');
 
-		const poolManagerJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLottoPoolManager.sol/LazyLottoPoolManager.json'),
-		);
-		const poolManagerIface = new ethers.Interface(poolManagerJson.abi);
-
-		const { readOnlyEVMFromMirrorNode, contractExecuteFunction } = require('../../../../utils/solidityHelpers');
+		const { contractExecuteFunction } = require('../../../../utils/solidityHelpers');
 		const { estimateGas } = require('../../../../utils/gasHelpers');
 
 		// Get creation fees
 		console.log('🔍 Fetching creation fees...\n');
-		let encodedCommand = poolManagerIface.encodeFunctionData('getCreationFees');
-		let result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const [hbarFee, lazyFee] = poolManagerIface.decodeFunctionResult('getCreationFees', result);
+		const [hbarFee, lazyFee] = await queryContract(env, poolManagerId, poolManagerIface, 'getCreationFees', [], operatorId);
 
 		console.log('═══════════════════════════════════════════════════════════');
 		console.log('  CREATION FEES');
@@ -277,8 +232,8 @@ async function createCommunityPool() {
 		const gasEstimate = gasInfo.gasLimit;
 
 		// Final confirmation
-		const confirm = await prompt('Create this pool? (yes/no): ');
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt('Create this pool? (yes/no): ');
+		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Pool creation cancelled');
 			process.exit(0);
 		}
@@ -312,9 +267,7 @@ async function createCommunityPool() {
 		// Try to determine pool ID from events
 		console.log('🔍 Fetching pool ID...');
 		// Get the latest pool count to estimate pool ID
-		encodedCommand = lazyLottoIface.encodeFunctionData('poolCount');
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const poolCount = lazyLottoIface.decodeFunctionResult('poolCount', result);
+		const poolCount = await queryContract(env, contractId, lazyLottoIface, 'totalPools', [], operatorId);
 		const estimatedPoolId = Number(poolCount[0]) - 1;
 		// Last created pool
 

@@ -222,7 +222,7 @@ Common errors and solutions:
 | `PoolPaused` | Pool is temporarily paused | Wait or try another pool |
 | `PoolClosed` | Pool no longer accepts entries | Try another pool |
 | `InsufficientBalance` | Not enough tokens | Add funds |
-| `InsufficientAllowance` | Token not approved | Approve to storage contract |
+| `InsufficientAllowance` | Token not approved | Approve $LAZY to GasStation, other tokens to Storage |
 | `NoEntries` | No entries to roll | Buy entries first |
 | `NoPrizes` | No prizes to claim | Win some prizes first |
 

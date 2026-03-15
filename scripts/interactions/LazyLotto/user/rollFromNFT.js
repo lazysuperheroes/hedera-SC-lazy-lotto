@@ -9,37 +9,19 @@
  * Usage: node scripts/interactions/LazyLotto/user/rollFromNFT.js [poolId] [serialNumber1,serialNumber2,...]
  */
 
-const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
-} = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
 require('dotenv').config();
+const {
+	Hbar,
+	HbarUnit,
+} = require('@hashgraph/sdk');
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
 
 // Helper: Convert Hedera ID to EVM address
 async function convertToHederaId(evmAddress) {
@@ -73,41 +55,29 @@ async function rollFromNFT() {
 			process.exit(1);
 		}
 
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const normalizedEnv = env.toLowerCase().includes('test') ? 'testnet'
-			: env.toLowerCase().includes('main') ? 'mainnet'
-				: env.toLowerCase().includes('preview') ? 'previewnet'
-					: env;
-
-		// Client setup
-		client = Client.forName(normalizedEnv);
-		client.setOperator(operatorId, operatorKey);
+		// Initialize client
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║          LAZY LOTTO - ROLL FROM NFT TICKETS              ║');
 		console.log('╚════════════════════════════════════════════════════════════╝\n');
-		console.log(`Network:       ${normalizedEnv.toUpperCase()}`);
+		console.log(`Network:       ${env.toUpperCase()}`);
 		console.log(`Account:       ${operatorId.toString()}`);
 		console.log(`Contract:      ${contractId.toString()}`);
 		console.log(`Pool ID:       ${poolId}\n`);
 
 		// Load contract ABI
-		const lazyLottoAbi = JSON.parse(fs.readFileSync('abi/LazyLotto.json', 'utf8'));
-		const iface = new ethers.Interface(lazyLottoAbi);
+		const iface = loadInterface('LazyLotto');
 
 		// Import helpers
-		const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
 		const { getSerialsOwned, getTokenDetails } = require('../../../../utils/hederaMirrorHelpers');
-		const { Hbar, HbarUnit } = require('@hashgraph/sdk');
 
 		console.log('📊 Fetching pool details...\n');
 
 		// Get pool basic info
-		let encodedCommand = iface.encodeFunctionData('getPoolBasicInfo', [poolId]);
-		let result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
 		// eslint-disable-next-line no-unused-vars
 		const [ticketCID, winCID, winRate, entryFee, prizeCount, outstanding, poolTokenIdEvm, paused, closed, feeToken] =
-			iface.decodeFunctionResult('getPoolBasicInfo', result);
+			await queryContract(env, contractId, iface, 'getPoolBasicInfo', [poolId], operatorId);
 
 		if (closed) {
 			console.error('❌ Pool is closed');
@@ -124,9 +94,7 @@ async function rollFromNFT() {
 
 		// Get user's boost (includes NFT boost + LAZY balance boost)
 		const userEvmAddress = `0x${operatorId.toSolidityAddress()}`;
-		encodedCommand = iface.encodeFunctionData('calculateBoost', [userEvmAddress]);
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const boostBps = iface.decodeFunctionResult('calculateBoost', result);
+		const boostBps = await queryContract(env, contractId, iface, 'calculateBoost', [userEvmAddress], operatorId);
 
 		const baseWinRate = Number(winRate);
 		const userBoost = Number(boostBps[0]);
@@ -206,8 +174,8 @@ async function rollFromNFT() {
 		console.log(`\n🎲 Rolling ${serialsToRoll.length} NFT ticket(s): ${serialsToRoll.join(', ')}\n`);
 
 		// Confirm action
-		const confirm = await prompt('Proceed with rolling? (y/n): ');
-		if (confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt('Proceed with rolling? (y/n): ');
+		if (confirmAnswer.toLowerCase() !== 'y') {
 			console.log('Operation cancelled.');
 			process.exit(0);
 		}
@@ -282,9 +250,7 @@ async function rollFromNFT() {
 				console.log('🔍 Fetching your prizes...\n');
 
 				// Fetch the actual prizes won using the offset
-				encodedCommand = iface.encodeFunctionData('getPendingPrizesPage', [userEvmAddress, offset, wins]);
-				result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-				const wonPrizes = iface.decodeFunctionResult('getPendingPrizesPage', result);
+				const wonPrizes = await queryContract(env, contractId, iface, 'getPendingPrizesPage', [userEvmAddress, offset, wins], operatorId);
 
 				if (wonPrizes && wonPrizes[0] && wonPrizes[0].length > 0) {
 					console.log('═══════════════════════════════════════════════════════════');

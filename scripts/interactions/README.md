@@ -195,19 +195,24 @@ PRIVATE_KEY=302e...  # ED25519 private key
 
 # Contract-specific (if needed)
 LAZY_TOKEN_ID=0.0.xxxxx
-LAZY_DECIMALS=8
+LAZY_DECIMALS=1
 ```
 
 ### Import Paths
 
-Scripts use relative paths to shared utilities:
+Scripts use shared utility modules via relative paths:
 
 ```javascript
-// Scripts in contract folders (e.g., LazySecureTrade/script.js)
-require('../../../utils/solidityHelpers')
+// All scripts use the shared CLI infrastructure:
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 
-// Scripts in nested folders (e.g., LazyLotto/admin/script.js)
-require('../../../../utils/solidityHelpers')
+// Path depth varies by directory:
+// LazyLotto/admin/*.js, LazyLotto/user/*.js, LazyLotto/queries/*.js → ../../../../utils/
+// LazyDelegateRegistry/*.js, LazySecureTrade/*.js, LazyGasStation/*.js → ../../../utils/
+// healthCheck.js → ../../utils/
 ```
 
 ---
@@ -279,17 +284,17 @@ ABIs are located in `abi/` folder at project root:
 
 All scripts use shared utility modules:
 
-**`utils/solidityHelpers.js`**:
-- `contractExecuteFunction()` - Execute contract methods
-- `readOnlyEVMFromMirrorNode()` - Query contract state
+**CLI Infrastructure** (used by all scripts):
+- `utils/clientFactory.js` - `createClient()`, `getEnvConfig()`, `getContractId()`
+- `utils/abiLoader.js` - `loadInterface()` - cached ABI loading
+- `utils/queryHelpers.js` - `queryContract()` - one-line read-only queries
+- `utils/promptHelpers.js` - `prompt()`, `confirm()` - shared readline
 
-**`utils/nodeHelpers.js`**:
-- `getArgFlag()` - Parse CLI arguments
-
-**`utils/hederaMirrorHelpers.js`**:
-- `getTokenDetails()` - Query token info
-- `getEventsFromMirror()` - Fetch contract logs
-- `checkMirrorHbarBalance()` - Check HBAR balances
+**Domain Helpers**:
+- `utils/solidityHelpers.js` - `contractExecuteFunction()`, `batchMirrorQuery()`
+- `utils/scriptHelpers.js` - `executeContractFunction()` (multi-sig aware)
+- `utils/hederaMirrorHelpers.js` - `getTokenDetails()`, `getEventsFromMirror()`, `checkMirrorHbarBalance()`
+- `utils/nodeHelpers.js` - `getArgFlag()` - Parse CLI arguments
 
 **`utils/transactionHelpers.js`**:
 - Transaction signing and submission helpers

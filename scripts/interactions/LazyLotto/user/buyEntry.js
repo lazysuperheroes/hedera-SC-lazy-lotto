@@ -7,44 +7,25 @@
  * Usage: node scripts/interactions/LazyLotto/user/buyEntry.js [poolId] [quantity]
  */
 
+require('dotenv').config();
 const {
-	Client,
-	AccountId,
-	PrivateKey,
 	ContractId,
 	TokenId,
 	Hbar,
 	HbarUnit,
 } = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
-require('dotenv').config();
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 
 const { getTokenDetails, homebrewPopulateAccountEvmAddress, checkMirrorBalance, checkMirrorAllowance } = require('../../../../utils/hederaMirrorHelpers');
 const { setFTAllowance } = require('../../../../utils/hederaHelpers');
 const { sleep } = require('@directus/sdk');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
 
 // Helper: Convert Hedera ID to EVM address
 async function convertToHederaId(evmAddress) {
@@ -77,24 +58,9 @@ async function buyEntry() {
 			console.error('❌ Invalid pool ID');
 			process.exit(1);
 		}
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const envUpper = env.toUpperCase();
 
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║              LazyLotto Buy Entry                          ║');
@@ -104,21 +70,16 @@ async function buyEntry() {
 		console.log(`🎰 Pool: #${poolId}\n`);
 
 		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
-		const { readOnlyEVMFromMirrorNode, contractExecuteFunction } = require('../../../../utils/solidityHelpers');
+		const lazyLottoIface = loadInterface('LazyLotto');
+		const { contractExecuteFunction } = require('../../../../utils/solidityHelpers');
 		const { estimateGas } = require('../../../../utils/gasHelpers');
 
 		console.log('🔍 Fetching pool details...\n');
 
 		// Get pool details
-		let encodedCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [poolId]);
-		let result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
 		// eslint-disable-next-line no-unused-vars
 		const [ticketCID, winCID, winRate, entryFee, prizeCount, outstandingEntries, poolTokenId, paused, closed, feeToken] =
-			lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', result);
+			await queryContract(env, contractId, lazyLottoIface, 'getPoolBasicInfo', [poolId], operatorId);
 
 		// Validate pool state
 		if (paused) {
@@ -151,9 +112,7 @@ async function buyEntry() {
 
 		// Get and display current entries
 		const userEvmAddress = await homebrewPopulateAccountEvmAddress(env, operatorId.toString());
-		encodedCommand = lazyLottoIface.encodeFunctionData('getUsersEntries', [poolId, userEvmAddress]);
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const currentEntries = lazyLottoIface.decodeFunctionResult('getUsersEntries', result);
+		const currentEntries = await queryContract(env, contractId, lazyLottoIface, 'getUsersEntries', [poolId, userEvmAddress], operatorId);
 
 		console.log('═══════════════════════════════════════════════════════════');
 		console.log('  CURRENT STATE');
@@ -195,10 +154,9 @@ async function buyEntry() {
 			}
 
 			// Get storage contract and check allowance
-			encodedCommand = lazyLottoIface.encodeFunctionData('storageContract');
-			result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-			const storageAddress = lazyLottoIface.decodeFunctionResult('storageContract', result);
-			const storageId = await convertToHederaId(storageAddress[0]);
+			const storageResult = await queryContract(env, contractId, lazyLottoIface, 'storageContract', [], operatorId);
+			const storageAddress = storageResult[0];
+			const storageId = await convertToHederaId(storageAddress);
 
 			// Check for LAZY token (uses LazyGasStation) or other FTs (uses Storage)
 			const lazyTokenIdStr = process.env.LAZY_TOKEN_ID;
@@ -258,8 +216,8 @@ async function buyEntry() {
 		const gasEstimate = gasInfo.gasLimit;
 
 		// Confirm purchase
-		const confirm = await prompt('Proceed with purchase? (yes/no): ');
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt('Proceed with purchase? (yes/no): ');
+		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Purchase cancelled');
 			process.exit(0);
 		}
@@ -290,9 +248,7 @@ async function buyEntry() {
 		await new Promise(resolve => setTimeout(resolve, 5000));
 
 		// Get updated entry count
-		encodedCommand = lazyLottoIface.encodeFunctionData('getUsersEntries', [poolId, userEvmAddress]);
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const entries = lazyLottoIface.decodeFunctionResult('getUsersEntries', result);
+		const entries = await queryContract(env, contractId, lazyLottoIface, 'getUsersEntries', [poolId, userEvmAddress], operatorId);
 
 		console.log('═══════════════════════════════════════════════════════════');
 		console.log('  UPDATED STATE');

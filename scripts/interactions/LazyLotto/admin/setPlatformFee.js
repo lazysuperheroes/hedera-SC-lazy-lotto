@@ -18,18 +18,11 @@
  *   --signers=Alice,Bob,Charlie     Label signers for clarity
  */
 
-const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
-} = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
 require('dotenv').config();
-
-const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
@@ -37,47 +30,14 @@ const {
 } = require('../../../../utils/scriptHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const poolManagerId = ContractId.fromString(process.env.LAZY_LOTTO_POOL_MANAGER_ID);
-
-function promptForInput(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise((resolve) => {
-		rl.question(question, (answer) => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const poolManagerId = getContractId('LAZY_LOTTO_POOL_MANAGER_ID');
 
 async function setPlatformFee(percentage) {
 	let client;
 
 	try {
-		// Normalize environment name
-		const envUpper = env.toUpperCase();
-
-		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║         Set Platform Fee Percentage (Admin)               ║');
@@ -86,25 +46,16 @@ async function setPlatformFee(percentage) {
 		console.log(`📄 Pool Manager: ${poolManagerId.toString()}`);
 		console.log(`👤 Admin: ${operatorId.toString()}\n`);
 
-		// Display multi-sig status if enabled
 		displayMultiSigBanner();
 
-		// Load interface
-		const poolManagerJson = JSON.parse(
-			fs.readFileSync(
-				'./artifacts/contracts/LazyLottoPoolManager.sol/LazyLottoPoolManager.json',
-			),
-		);
-		const poolManagerIface = new ethers.Interface(poolManagerJson.abi);
+		const poolManagerIface = loadInterface('LazyLottoPoolManager');
 
 		// Get current percentage
 		console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 		console.log('📋 Current Platform Fee');
 		console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-		const encodedCommand = poolManagerIface.encodeFunctionData('platformProceedsPercentage');
-		const result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const currentPercentage = poolManagerIface.decodeFunctionResult('platformProceedsPercentage', result);
+		const currentPercentage = await queryContract(env, poolManagerId, poolManagerIface, 'platformProceedsPercentage', [], operatorId);
 
 		const currentPercent = Number(currentPercentage[0]);
 		const currentOwnerPercent = 100 - currentPercent;
@@ -122,15 +73,14 @@ async function setPlatformFee(percentage) {
 		console.log(`   Pool Owner: ${ownerPercent}%\n`);
 
 		// Confirm
-		const confirm = await promptForInput('❓ Confirm setting new platform fee? (yes/no): ');
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const answer = await prompt('❓ Confirm setting new platform fee? (yes/no): ');
+		if (answer.toLowerCase() !== 'yes' && answer.toLowerCase() !== 'y') {
 			console.log('\n❌ Operation cancelled.\n');
 			return;
 		}
 
 		console.log('\n⏳ Setting platform fee percentage...\n');
 
-		// Execute transaction (supports both single-sig and multi-sig)
 		const executionResult = await executeContractFunction({
 			contractId: poolManagerId,
 			iface: poolManagerIface,
@@ -149,7 +99,6 @@ async function setPlatformFee(percentage) {
 
 		console.log('✅ Platform fee updated successfully!\n');
 
-		// Handle different receipt formats (single-sig vs multi-sig)
 		const txId = receipt.transactionId?.toString() || 'N/A';
 		const status = receipt.status?.toString() || 'SUCCESS';
 
@@ -161,8 +110,7 @@ async function setPlatformFee(percentage) {
 		console.log('✓ Verified New Fee');
 		console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-		const verifyResult = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const newPercentage = poolManagerIface.decodeFunctionResult('platformProceedsPercentage', verifyResult);
+		const newPercentage = await queryContract(env, poolManagerId, poolManagerIface, 'platformProceedsPercentage', [], operatorId);
 
 		const newPercent = Number(newPercentage[0]);
 		const newOwnerPercent = 100 - newPercent;
@@ -190,22 +138,18 @@ async function setPlatformFee(percentage) {
 }
 
 async function main() {
-	// Check for multi-sig help request
 	if (checkMultiSigHelp()) {
 		process.exit(0);
 	}
 
-	// Check for command line argument
 	let percentage = process.argv[2];
 
-	// Filter out flag arguments
 	if (percentage && percentage.startsWith('--')) {
 		percentage = null;
 	}
 
-	// If not provided, prompt
 	if (!percentage) {
-		percentage = await promptForInput('Enter platform fee percentage (0-25): ');
+		percentage = await prompt('Enter platform fee percentage (0-25): ');
 	}
 
 	percentage = parseInt(percentage);
@@ -218,5 +162,4 @@ async function main() {
 	await setPlatformFee(percentage);
 }
 
-// Run the script
 main();

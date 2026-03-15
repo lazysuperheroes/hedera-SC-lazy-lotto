@@ -19,19 +19,15 @@
  *   --signers=Alice,Bob,Charlie     Label signers for clarity
  */
 
-const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
-	TokenId,
-} = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
-const { associateTokensToAccount } = require('../../../../utils/hederaHelpers');
 require('dotenv').config();
-
+const { TokenId } = require('@hashgraph/sdk');
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
+const { associateTokensToAccount } = require('../../../../utils/hederaHelpers');
+const { homebrewPopulateAccountNum, EntityType, checkMirrorBalance } = require('../../../../utils/hederaMirrorHelpers');
+const { estimateGas } = require('../../../../utils/gasHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
@@ -39,25 +35,8 @@ const {
 } = require('../../../../utils/scriptHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
 
 // Helper: Format win rate
 function formatWinRate(thousandthsOfBps) {
@@ -73,24 +52,8 @@ async function buyAndRedeemEntry() {
 	let client;
 
 	try {
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║     LazyLotto Admin Buy & Redeem Entry (Admin)            ║');
@@ -103,19 +66,10 @@ async function buyAndRedeemEntry() {
 		displayMultiSigBanner();
 
 		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
-
-		// Import helpers
-		const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
-		const { estimateGas } = require('../../../../utils/gasHelpers');
+		const lazyLottoIface = loadInterface('LazyLotto');
 
 		// Get total pools
-		const encodedQuery = lazyLottoIface.encodeFunctionData('totalPools', []);
-		let result = await readOnlyEVMFromMirrorNode(env, contractId, encodedQuery, operatorId, false);
-		const decoded = lazyLottoIface.decodeFunctionResult('totalPools', result);
+		const decoded = await queryContract(env, contractId, lazyLottoIface, 'totalPools', [], operatorId);
 		const totalPools = Number(decoded[0]);
 
 		if (totalPools === 0) {
@@ -158,11 +112,9 @@ async function buyAndRedeemEntry() {
 		}
 
 		// Get pool token for association check
-		const poolInfoCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [poolId]);
-		const poolInfoResult = await readOnlyEVMFromMirrorNode(env, contractId, poolInfoCommand, operatorId, false);
+		const poolInfoResult = await queryContract(env, contractId, lazyLottoIface, 'getPoolBasicInfo', [poolId], operatorId);
 		// eslint-disable-next-line no-unused-vars
-		const [ticketCID, winCID, winRate, entryFee, prizeCount, outstanding, poolTokenId, paused, closed, feeToken] =
-			lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', poolInfoResult);
+		const [ticketCID, winCID, winRate, entryFee, prizeCount, outstanding, poolTokenId, paused, closed, feeToken] = poolInfoResult;
 
 		if (paused) {
 			console.error('\n❌ Pool is paused');
@@ -175,9 +127,8 @@ async function buyAndRedeemEntry() {
 		}
 
 		// Get bonus calculation
-		const boostCommand = lazyLottoIface.encodeFunctionData('calculateBoost', [operatorId.toSolidityAddress()]);
-		const boostResult = await readOnlyEVMFromMirrorNode(env, contractId, boostCommand, operatorId, false);
-		const boost = lazyLottoIface.decodeFunctionResult('calculateBoost', boostResult)[0];
+		const boostResult = await queryContract(env, contractId, lazyLottoIface, 'calculateBoost', [operatorId.toSolidityAddress()], operatorId);
+		const boost = boostResult[0];
 
 		const baseWinRate = Number(winRate);
 		const effectiveWinRate = Math.min(baseWinRate + Number(boost), 100_000_000);
@@ -196,14 +147,12 @@ async function buyAndRedeemEntry() {
 		console.log(`\n🎁 Admin privilege: Creating ${ticketCount} FREE NFT tickets`);
 
 		// Associate pool token if needed
-		const { homebrewPopulateAccountNum, EntityType, checkMirrorBalance } = require('../../../../utils/hederaMirrorHelpers');
-
 		const poolTokenHederaId = await homebrewPopulateAccountNum(env, poolTokenId, EntityType.TOKEN);
 		const userBalance = await checkMirrorBalance(env, operatorId, poolTokenHederaId);
 
 		if (userBalance === null) {
 			console.log(`\n🔗 Associating pool NFT token (${poolTokenHederaId})...`);
-			result = await associateTokensToAccount(
+			const result = await associateTokensToAccount(
 				client,
 				operatorId,
 				operatorKey,
@@ -234,8 +183,8 @@ async function buyAndRedeemEntry() {
 		const gasEstimate = gasInfo.gasLimit;
 
 		// Confirm
-		const confirm = await prompt(`Create ${ticketCount} free NFT tickets? (yes/no): `);
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt(`Create ${ticketCount} free NFT tickets? (yes/no): `);
+		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Operation cancelled');
 			process.exit(0);
 		}

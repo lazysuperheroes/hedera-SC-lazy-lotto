@@ -1,11 +1,11 @@
+require('dotenv').config();
 const {
 	AccountId,
 	ContractId,
 } = require('@hashgraph/sdk');
-require('dotenv').config();
 const fs = require('fs');
-const { ethers } = require('ethers');
 const readlineSync = require('readline-sync');
+const { loadInterface } = require('../../../utils/abiLoader');
 const { getEventsFromMirror } = require('../../../utils/hederaMirrorHelpers');
 const { getArgFlag } = require('../../../utils/nodeHelpers');
 
@@ -43,18 +43,12 @@ const main = async () => {
 
 	const contractId = ContractId.fromString(args[0]);
 
-	console.log('\n-Using ENIVRONMENT:', env);
+	console.log('\n-Using ENVIRONMENT:', env);
 	console.log('\n-Using Operator:', operatorId.toString());
 	console.log('\n-Using Contract:', contractId.toString());
 
-	// import ABI
-	const missionJSON = JSON.parse(
-		fs.readFileSync(
-			`./artifacts/contracts/${contractName}.sol/${contractName}.json`,
-		),
-	);
-
-	const lstIface = new ethers.Interface(missionJSON.abi);
+	// Import ABI
+	const lstIface = loadInterface(contractName);
 
 	// Call the function to fetch logs
 	const logs = await getEventsFromMirror(env, contractId, lstIface);

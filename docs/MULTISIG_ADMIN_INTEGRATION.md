@@ -31,11 +31,12 @@ node scripts/interactions/LazyLotto/admin/setPlatformFee.js 10 --multisig --expo
 At the top of your admin script, add the script helpers import:
 
 ```javascript
-// Before
-const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
-
-// After
-const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
+// Add these imports to any admin script:
+require('dotenv').config();
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,

@@ -1,11 +1,10 @@
+require('dotenv').config();
 const {
 	AccountId,
 	ContractId,
 } = require('@hashgraph/sdk');
-require('dotenv').config();
-const fs = require('fs');
-const { ethers } = require('ethers');
-const { readOnlyEVMFromMirrorNode } = require('../../../utils/solidityHelpers');
+const { loadInterface } = require('../../../utils/abiLoader');
+const { queryContract } = require('../../../utils/queryHelpers');
 const { getArgFlag } = require('../../../utils/nodeHelpers');
 
 // Get operator from .env file
@@ -42,75 +41,24 @@ const main = async () => {
 
 	const contractId = ContractId.fromString(args[0]);
 
-	console.log('\n-Using ENIVRONMENT:', env);
+	console.log('\n-Using ENVIRONMENT:', env);
 	console.log('\n-Using Operator:', operatorId.toString());
 	console.log('\n-Using Contract:', contractId.toString());
 
-	// import ABI
-	const lgsJSON = JSON.parse(
-		fs.readFileSync(
-			`./artifacts/contracts/${contractName}.sol/${contractName}.json`,
-		),
-	);
+	// Import ABI
+	const lgsIface = loadInterface(contractName);
 
-	const lgsIface = new ethers.Interface(lgsJSON.abi);
-
-	// query the EVM via mirror node (readOnlyEVMFromMirrorNode) to know
+	// query the EVM via mirror node
 	// 1) getAdmins
-
-	let encodedCommand = lgsIface.encodeFunctionData('getAdmins', []);
-
-	let result = await readOnlyEVMFromMirrorNode(
-		env,
-		contractId,
-		encodedCommand,
-		operatorId,
-		false,
-	);
-
-	const admins = lgsIface.decodeFunctionResult(
-		'getAdmins',
-		result,
-	);
-
+	const admins = await queryContract(env, contractId, lgsIface, 'getAdmins', [], operatorId);
 	console.log('Admins:', admins[0].map((a) => AccountId.fromEvmAddress(0, 0, a).toString()).join(', '));
 
 	// 2) getAuthorizers
-
-	encodedCommand = lgsIface.encodeFunctionData('getAuthorizers', []);
-
-	result = await readOnlyEVMFromMirrorNode(
-		env,
-		contractId,
-		encodedCommand,
-		operatorId,
-		false,
-	);
-
-	const authorizers = lgsIface.decodeFunctionResult(
-		'getAuthorizers',
-		result,
-	);
-
+	const authorizers = await queryContract(env, contractId, lgsIface, 'getAuthorizers', [], operatorId);
 	console.log('Authorizers:', authorizers[0].map((a) => AccountId.fromEvmAddress(0, 0, a).toString()).join(', '));
 
 	// 3) getContractUsers
-
-	encodedCommand = lgsIface.encodeFunctionData('getContractUsers', []);
-
-	result = await readOnlyEVMFromMirrorNode(
-		env,
-		contractId,
-		encodedCommand,
-		operatorId,
-		false,
-	);
-
-	const contractUsers = lgsIface.decodeFunctionResult(
-		'getContractUsers',
-		result,
-	);
-
+	const contractUsers = await queryContract(env, contractId, lgsIface, 'getContractUsers', [], operatorId);
 	console.log('Contract Users:', contractUsers[0].map((a) => AccountId.fromEvmAddress(0, 0, a).toString()).join(', '));
 };
 

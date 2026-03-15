@@ -11,27 +11,23 @@
  * Usage: node scripts/interactions/LazyLotto/queries/masterInfo.js
  */
 
+require('dotenv').config();
 const {
-	Client,
-	AccountId,
-	PrivateKey,
 	ContractId,
 	Hbar,
 	HbarUnit,
 } = require('@hashgraph/sdk');
 const { ethers } = require('ethers');
-const fs = require('fs');
-require('dotenv').config();
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { batchMirrorQuery } = require('../../../../utils/solidityHelpers');
 
 const { homebrewPopulateAccountNum, EntityType, getTokenDetails } = require('../../../../utils/hederaMirrorHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-const storageContractId = ContractId.fromString(process.env.LAZY_LOTTO_STORAGE);
-const poolManagerId = process.env.LAZY_LOTTO_POOL_MANAGER_ID ? ContractId.fromString(process.env.LAZY_LOTTO_POOL_MANAGER_ID) : null;
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
+const storageContractId = getContractId('LAZY_LOTTO_STORAGE');
 
 // Helper: Convert Hedera ID to EVM address
 
@@ -51,24 +47,8 @@ async function getMasterInfo() {
 	let client;
 
 	try {
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║         LazyLotto Master Information Query                ║');
@@ -103,31 +83,29 @@ async function getMasterInfo() {
 			console.warn('⚠️  Could not verify contract on mirror node, continuing anyway...\n');
 		}
 
-		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
-
-		// const storageContractJson = JSON.parse(
-		// 	fs.readFileSync('./artifacts/contracts/LazyLottoStorage.sol/LazyLottoStorage.json'),
-		// );
-
-		// const lazyLottoStorageIface = new ethers.Interface(storageContractJson.abi);
-
-		// Import helper
-		const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
+		// Load contract ABIs
+		const lazyLottoIface = loadInterface('LazyLotto');
 
 		console.log('🔍 Fetching contract configuration...\n');
 
-		// Get immutable variables (with error handling for 404)
-		let encodedCommand, result;
+		// Batch all 7 config queries + poolManager + totalPools in parallel
+		const configQueries = [
+			{ contractId, encoded: lazyLottoIface.encodeFunctionData('lazyToken'), label: 'lazyToken' },
+			{ contractId, encoded: lazyLottoIface.encodeFunctionData('lazyGasStation'), label: 'lazyGasStation' },
+			{ contractId, encoded: lazyLottoIface.encodeFunctionData('lazyDelegateRegistry'), label: 'lazyDelegateRegistry' },
+			{ contractId, encoded: lazyLottoIface.encodeFunctionData('prng'), label: 'prng' },
+			{ contractId, encoded: lazyLottoIface.encodeFunctionData('storageContract'), label: 'storageContract' },
+			{ contractId, encoded: lazyLottoIface.encodeFunctionData('burnPercentage'), label: 'burnPercentage' },
+			{ contractId, encoded: lazyLottoIface.encodeFunctionData('paused'), label: 'paused' },
+			{ contractId, encoded: lazyLottoIface.encodeFunctionData('poolManager'), label: 'poolManager' },
+			{ contractId, encoded: lazyLottoIface.encodeFunctionData('totalPools'), label: 'totalPools' },
+		];
 
-		try {
-			encodedCommand = lazyLottoIface.encodeFunctionData('lazyToken');
-			result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		}
-		catch (error) {
+		const configResults = await batchMirrorQuery(env, configQueries, operatorId, { concurrency: 25 });
+
+		// Check for 404 errors on first query (contract existence check)
+		if (configResults[0].error) {
+			const error = configResults[0].error;
 			if (error.response && error.response.status === 404) {
 				console.error('❌ Contract not found on mirror node.');
 				console.error('   This could mean:');
@@ -141,37 +119,21 @@ async function getMasterInfo() {
 			throw error;
 		}
 
-		const lazyTokenAddr = lazyLottoIface.decodeFunctionResult('lazyToken', result);
-		const lazyToken = await convertToHederaId(lazyTokenAddr[0], EntityType.TOKEN);
-
-		encodedCommand = lazyLottoIface.encodeFunctionData('lazyGasStation');
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const lazyGasStationAddr = lazyLottoIface.decodeFunctionResult('lazyGasStation', result);
-		const lazyGasStation = await convertToHederaId(lazyGasStationAddr[0], EntityType.CONTRACT);
-
-		encodedCommand = lazyLottoIface.encodeFunctionData('lazyDelegateRegistry');
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const lazyDelegateRegistryAddr = lazyLottoIface.decodeFunctionResult('lazyDelegateRegistry', result);
-		const lazyDelegateRegistry = await convertToHederaId(lazyDelegateRegistryAddr[0], EntityType.CONTRACT);
-
-		encodedCommand = lazyLottoIface.encodeFunctionData('prng');
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const prngAddr = lazyLottoIface.decodeFunctionResult('prng', result);
-		const prng = await convertToHederaId(prngAddr[0], EntityType.CONTRACT);
-
-		encodedCommand = lazyLottoIface.encodeFunctionData('storageContract');
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const storageAddr = lazyLottoIface.decodeFunctionResult('storageContract', result);
-		const storage = await convertToHederaId(storageAddr[0], EntityType.CONTRACT);
-
-		encodedCommand = lazyLottoIface.encodeFunctionData('burnPercentage');
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const burnPercentage = lazyLottoIface.decodeFunctionResult('burnPercentage', result);
-
-		// Check if paused
-		encodedCommand = lazyLottoIface.encodeFunctionData('paused');
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const isPaused = lazyLottoIface.decodeFunctionResult('paused', result);
+		// Decode all config results
+		const lazyToken = await convertToHederaId(
+			lazyLottoIface.decodeFunctionResult('lazyToken', configResults[0].result)[0], EntityType.TOKEN);
+		const lazyGasStation = await convertToHederaId(
+			lazyLottoIface.decodeFunctionResult('lazyGasStation', configResults[1].result)[0], EntityType.CONTRACT);
+		const lazyDelegateRegistry = await convertToHederaId(
+			lazyLottoIface.decodeFunctionResult('lazyDelegateRegistry', configResults[2].result)[0], EntityType.CONTRACT);
+		const prng = await convertToHederaId(
+			lazyLottoIface.decodeFunctionResult('prng', configResults[3].result)[0], EntityType.CONTRACT);
+		const storage = await convertToHederaId(
+			lazyLottoIface.decodeFunctionResult('storageContract', configResults[4].result)[0], EntityType.CONTRACT);
+		const burnPercentage = lazyLottoIface.decodeFunctionResult('burnPercentage', configResults[5].result);
+		const isPaused = lazyLottoIface.decodeFunctionResult('paused', configResults[6].result);
+		const poolManagerAddr = lazyLottoIface.decodeFunctionResult('poolManager', configResults[7].result)[0];
+		const totalPools = lazyLottoIface.decodeFunctionResult('totalPools', configResults[8].result);
 
 		console.log('═══════════════════════════════════════════════════════════');
 		console.log('  CONTRACT CONFIGURATION');
@@ -185,16 +147,76 @@ async function getMasterInfo() {
 		console.log(`  Contract Paused:        ${isPaused[0] ? '🔴 YES' : '🟢 NO'}`);
 		console.log('═══════════════════════════════════════════════════════════\n');
 
-		// Get bonus system info
+		// Load PoolManager for bonus system queries (poolManagerAddr already fetched in config batch)
+		const resolvedPoolManagerId = ContractId.fromString(await convertToHederaId(poolManagerAddr, EntityType.CONTRACT));
+
+		const poolManagerIface = loadInterface('LazyLottoPoolManager');
+
+		// Get bonus system info (lives on PoolManager, not LazyLotto)
 		console.log('🎁 Fetching bonus system configuration...\n');
 
-		encodedCommand = lazyLottoIface.encodeFunctionData('totalTimeBonuses');
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const totalTimeBonuses = lazyLottoIface.decodeFunctionResult('totalTimeBonuses', result);
+		// Batch the bonus count queries + LAZY balance bonus queries in parallel
+		const bonusCountQueries = [
+			{ contractId: resolvedPoolManagerId, encoded: poolManagerIface.encodeFunctionData('totalTimeBonuses'), label: 'totalTimeBonuses' },
+			{ contractId: resolvedPoolManagerId, encoded: poolManagerIface.encodeFunctionData('totalNFTBonusTokens'), label: 'totalNFTBonusTokens' },
+			{ contractId: resolvedPoolManagerId, encoded: poolManagerIface.encodeFunctionData('lazyBalanceThreshold'), label: 'lazyBalanceThreshold' },
+			{ contractId: resolvedPoolManagerId, encoded: poolManagerIface.encodeFunctionData('lazyBalanceBonusBps'), label: 'lazyBalanceBonusBps' },
+		];
 
-		encodedCommand = lazyLottoIface.encodeFunctionData('totalNFTBonusTokens');
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const totalNFTBonuses = lazyLottoIface.decodeFunctionResult('totalNFTBonusTokens', result);
+		const bonusCountResults = await batchMirrorQuery(env, bonusCountQueries, operatorId, { concurrency: 25 });
+
+		const totalTimeBonuses = poolManagerIface.decodeFunctionResult('totalTimeBonuses', bonusCountResults[0].result);
+		const totalNFTBonuses = poolManagerIface.decodeFunctionResult('totalNFTBonusTokens', bonusCountResults[1].result);
+		const lazyThreshold = poolManagerIface.decodeFunctionResult('lazyBalanceThreshold', bonusCountResults[2].result)[0];
+		const lazyBps = Number(poolManagerIface.decodeFunctionResult('lazyBalanceBonusBps', bonusCountResults[3].result)[0]);
+
+		// Batch all time bonus and NFT bonus token queries in parallel
+		const bonusDetailQueries = [];
+		for (let i = 0; i < Number(totalTimeBonuses[0]); i++) {
+			bonusDetailQueries.push({
+				contractId: resolvedPoolManagerId,
+				encoded: poolManagerIface.encodeFunctionData('timeBonuses', [i]),
+				label: `timeBonus_${i}`,
+			});
+		}
+		for (let i = 0; i < Number(totalNFTBonuses[0]); i++) {
+			bonusDetailQueries.push({
+				contractId: resolvedPoolManagerId,
+				encoded: poolManagerIface.encodeFunctionData('nftBonusTokens', [i]),
+				label: `nftBonusToken_${i}`,
+			});
+		}
+
+		const bonusDetailResults = bonusDetailQueries.length > 0
+			? await batchMirrorQuery(env, bonusDetailQueries, operatorId, { concurrency: 25 })
+			: [];
+
+		// Parse time bonus results
+		const timeBonusCount = Number(totalTimeBonuses[0]);
+		const timeBonusData = [];
+		for (let i = 0; i < timeBonusCount; i++) {
+			const timeBonusResult = poolManagerIface.decodeFunctionResult('timeBonuses', bonusDetailResults[i].result);
+			timeBonusData.push(timeBonusResult[0]);
+		}
+
+		// Parse NFT bonus token addresses, then batch the nftBonusBps queries
+		const nftBonusCount = Number(totalNFTBonuses[0]);
+		const nftTokenAddresses = [];
+		for (let i = 0; i < nftBonusCount; i++) {
+			const nftTokenResult = poolManagerIface.decodeFunctionResult('nftBonusTokens', bonusDetailResults[timeBonusCount + i].result);
+			nftTokenAddresses.push(nftTokenResult[0]);
+		}
+
+		// Batch nftBonusBps queries for all NFT bonus tokens
+		const nftBpsQueries = nftTokenAddresses.map((addr, i) => ({
+			contractId: resolvedPoolManagerId,
+			encoded: poolManagerIface.encodeFunctionData('nftBonusBps', [addr]),
+			label: `nftBonusBps_${i}`,
+		}));
+
+		const nftBpsResults = nftBpsQueries.length > 0
+			? await batchMirrorQuery(env, nftBpsQueries, operatorId, { concurrency: 25 })
+			: [];
 
 		console.log('═══════════════════════════════════════════════════════════');
 		console.log('  BONUS SYSTEM');
@@ -202,87 +224,60 @@ async function getMasterInfo() {
 
 		// Time-based bonuses
 		console.log(`\n⏰ Time-Based Bonuses: ${totalTimeBonuses[0]}`);
-		if (Number(totalTimeBonuses[0]) > 0) {
-			for (let i = 0; i < Number(totalTimeBonuses[0]); i++) {
-				encodedCommand = lazyLottoIface.encodeFunctionData('timeBonuses', [i]);
-				result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-				const timeBonusResult = lazyLottoIface.decodeFunctionResult('timeBonuses', result);
-				const timeBonus = timeBonusResult[0];
+		for (let i = 0; i < timeBonusCount; i++) {
+			const timeBonus = timeBonusData[i];
+			const start = Number(timeBonus.start);
+			const end = Number(timeBonus.end);
+			const bps = Number(timeBonus.bonusBps);
 
-				const start = Number(timeBonus.start);
-				const end = Number(timeBonus.end);
-				const bps = Number(timeBonus.bonusBps);
-
-				console.log(`\n  Bonus #${i}:`);
-				if (start === 0 && end === 0) {
-					console.log('    Status:   DISABLED');
+			console.log(`\n  Bonus #${i}:`);
+			if (start === 0 && end === 0) {
+				console.log('    Status:   DISABLED');
+			}
+			else {
+				const now = Math.floor(Date.now() / 1000);
+				let status;
+				if (now < start) {
+					status = 'UPCOMING';
+				}
+				else if (now >= start && now <= end) {
+					status = 'ACTIVE';
 				}
 				else {
-					const now = Math.floor(Date.now() / 1000);
-					let status;
-					if (now < start) {
-						status = 'UPCOMING';
-					}
-					else if (now >= start && now <= end) {
-						status = 'ACTIVE';
-					}
-					else {
-						status = 'EXPIRED';
-					}
-					console.log(`    Status:   ${status}`);
-					console.log(`    Start:    ${new Date(start * 1000).toISOString()}`);
-					console.log(`    End:      ${new Date(end * 1000).toISOString()}`);
+					status = 'EXPIRED';
 				}
-				console.log(`    Boost:    +${(bps / 100).toFixed(2)}%`);
+				console.log(`    Status:   ${status}`);
+				console.log(`    Start:    ${new Date(start * 1000).toISOString()}`);
+				console.log(`    End:      ${new Date(end * 1000).toISOString()}`);
 			}
+			console.log(`    Boost:    +${(bps / 100).toFixed(2)}%`);
 		}
 
 		// NFT holding bonuses
 		console.log(`\n🎨 NFT Holding Bonuses: ${totalNFTBonuses[0]}`);
-		if (Number(totalNFTBonuses[0]) > 0) {
-			for (let i = 0; i < Number(totalNFTBonuses[0]); i++) {
-				encodedCommand = lazyLottoIface.encodeFunctionData('nftBonusTokens', [i]);
-				result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-				const nftTokenResult = lazyLottoIface.decodeFunctionResult('nftBonusTokens', result);
-				const nftTokenAddress = nftTokenResult[0];
+		for (let i = 0; i < nftBonusCount; i++) {
+			const nftTokenAddress = nftTokenAddresses[i];
+			const bps = Number(poolManagerIface.decodeFunctionResult('nftBonusBps', nftBpsResults[i].result)[0]);
+			const tokenId = await convertToHederaId(nftTokenAddress, EntityType.TOKEN);
 
-				encodedCommand = lazyLottoIface.encodeFunctionData('nftBonusBps', [nftTokenAddress]);
-				result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-				const nftBpsResult = lazyLottoIface.decodeFunctionResult('nftBonusBps', result);
-				const bps = Number(nftBpsResult[0]);
-
-				const tokenId = await convertToHederaId(nftTokenAddress, EntityType.TOKEN);
-
-				// Try to get token details from mirror node
-				let tokenName = 'Unknown';
-				let tokenSymbol = '';
-				try {
-					const tokenDetails = await getTokenDetails(env, tokenId);
-					tokenName = tokenDetails.name || 'Unknown';
-					tokenSymbol = tokenDetails.symbol || '';
-				}
-				catch (e) {
-					// Token details not available
-					console.warn(`⚠️  Could not fetch details for token ${tokenId}: ${e.message}`);
-				}
-
-				console.log(`\n  Bonus #${i}:`);
-				console.log(`    Token:    ${tokenId} (${tokenSymbol})`);
-				console.log(`    Name:     ${tokenName}`);
-				console.log(`    Boost:    +${(bps / 100).toFixed(2)}% (if any NFT held)`);
+			// Try to get token details from mirror node
+			let tokenName = 'Unknown';
+			let tokenSymbol = '';
+			try {
+				const tokenDetails = await getTokenDetails(env, tokenId);
+				tokenName = tokenDetails.name || 'Unknown';
+				tokenSymbol = tokenDetails.symbol || '';
 			}
+			catch (e) {
+				// Token details not available
+				console.warn(`⚠️  Could not fetch details for token ${tokenId}: ${e.message}`);
+			}
+
+			console.log(`\n  Bonus #${i}:`);
+			console.log(`    Token:    ${tokenId} (${tokenSymbol})`);
+			console.log(`    Name:     ${tokenName}`);
+			console.log(`    Boost:    +${(bps / 100).toFixed(2)}% (if any NFT held)`);
 		}
-
-		// LAZY balance bonus
-		encodedCommand = lazyLottoIface.encodeFunctionData('lazyBalanceThreshold');
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const lazyThresholdResult = lazyLottoIface.decodeFunctionResult('lazyBalanceThreshold', result);
-		const lazyThreshold = lazyThresholdResult[0];
-
-		encodedCommand = lazyLottoIface.encodeFunctionData('lazyBalanceBonusBps');
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const lazyBpsResult = lazyLottoIface.decodeFunctionResult('lazyBalanceBonusBps', result);
-		const lazyBps = Number(lazyBpsResult[0]);
 
 		console.log('\n💎 LAZY Balance Bonus:');
 		if (lazyThreshold === 0n || lazyBps === 0) {
@@ -290,18 +285,14 @@ async function getMasterInfo() {
 		}
 		else {
 			console.log('    Status:     ACTIVE');
-			console.log(`    Threshold:  ${ethers.formatUnits(lazyThreshold, 8)} LAZY`);
+			console.log(`    Threshold:  ${ethers.formatUnits(lazyThreshold, parseInt(process.env.LAZY_DECIMALS ?? '1'))} LAZY`);
 			console.log(`    Boost:      +${(lazyBps / 100).toFixed(2)}%`);
 		}
 
 		console.log('\n═══════════════════════════════════════════════════════════\n');
 
-		// Get total pools
+		// totalPools already fetched in config batch
 		console.log('🎰 Fetching lottery pools...\n');
-
-		encodedCommand = lazyLottoIface.encodeFunctionData('totalPools');
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const totalPools = lazyLottoIface.decodeFunctionResult('totalPools', result);
 
 		console.log(`📊 Total Pools: ${totalPools[0]}\n`);
 
@@ -310,18 +301,72 @@ async function getMasterInfo() {
 			return;
 		}
 
-		// Fetch all pools
-		const pools = [];
+		// Batch ALL pool basic info queries in parallel
+		const poolCount = Number(totalPools[0]);
+		const poolInfoQueries = [];
+		for (let i = 0; i < poolCount; i++) {
+			poolInfoQueries.push({
+				contractId,
+				encoded: lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [i]),
+				label: `poolBasicInfo_${i}`,
+			});
+		}
+
+		const poolInfoResults = await batchMirrorQuery(env, poolInfoQueries, operatorId, { concurrency: 25 });
+
+		// Parse pool basic info and collect prize queries
+		const poolBasicData = [];
+		const prizeQueries = [];
 		// Cache token details to avoid duplicate queries
 		const tokenDetailsCache = new Map();
 
-		for (let i = 0; i < Number(totalPools[0]); i++) {
-			encodedCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [i]);
-			result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-			const poolBasicInfo = lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', result);
+		for (let i = 0; i < poolCount; i++) {
+			if (poolInfoResults[i].error) {
+				console.warn(`⚠️  Failed to fetch pool #${i}: ${poolInfoResults[i].error.message}`);
+				continue;
+			}
+			const poolBasicInfo = lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', poolInfoResults[i].result);
 			const [ticketCID, winCID, winRate, entryFee, prizeCount, outstandingEntries, poolTokenId, paused, closed, feeToken] = poolBasicInfo;
 
-			const feeTokenAddr = feeToken;
+			poolBasicData.push({
+				index: i,
+				ticketCID, winCID, winRate, entryFee,
+				prizeCount: Number(prizeCount),
+				outstandingEntries: Number(outstandingEntries),
+				poolTokenId, paused, closed, feeToken,
+			});
+
+			// Queue prize queries for this pool
+			for (let j = 0; j < Number(prizeCount); j++) {
+				prizeQueries.push({
+					contractId,
+					encoded: lazyLottoIface.encodeFunctionData('getPrizePackage', [i, j]),
+					label: `prize_${i}_${j}`,
+					poolIndex: i,
+					prizeIndex: j,
+				});
+			}
+		}
+
+		// Batch ALL prize queries in parallel
+		const prizeResults = prizeQueries.length > 0
+			? await batchMirrorQuery(env, prizeQueries, operatorId, { concurrency: 25 })
+			: [];
+
+		// Build prize result lookup by pool index
+		const prizeResultsByPool = new Map();
+		for (let q = 0; q < prizeQueries.length; q++) {
+			const poolIdx = prizeQueries[q].poolIndex;
+			if (!prizeResultsByPool.has(poolIdx)) {
+				prizeResultsByPool.set(poolIdx, []);
+			}
+			prizeResultsByPool.get(poolIdx).push(prizeResults[q]);
+		}
+
+		// Build pool objects with resolved token IDs
+		const pools = [];
+		for (const pbd of poolBasicData) {
+			const feeTokenAddr = pbd.feeToken;
 			const feeTokenId = feeTokenAddr === '0x0000000000000000000000000000000000000000'
 				? 'HBAR'
 				: await convertToHederaId(feeTokenAddr);
@@ -332,23 +377,24 @@ async function getMasterInfo() {
 			}
 
 			const pool = {
-				id: i,
-				ticketCID: ticketCID,
-				winCID: winCID,
-				winRateThousandthsOfBps: Number(winRate),
-				entryFee: Number(entryFee),
-				prizeCount: Number(prizeCount),
-				outstandingEntries: Number(outstandingEntries),
-				poolTokenId: await convertToHederaId(poolTokenId),
-				paused: paused,
-				closed: closed,
+				id: pbd.index,
+				ticketCID: pbd.ticketCID,
+				winCID: pbd.winCID,
+				winRateThousandthsOfBps: Number(pbd.winRate),
+				entryFee: Number(pbd.entryFee),
+				prizeCount: pbd.prizeCount,
+				outstandingEntries: pbd.outstandingEntries,
+				poolTokenId: await convertToHederaId(pbd.poolTokenId),
+				paused: pbd.paused,
+				closed: pbd.closed,
 				feeToken: feeTokenId,
 			};
+
 			pool.prizes = [];
-			for (let j = 0; j < pool.prizeCount; j++) {
-				encodedCommand = lazyLottoIface.encodeFunctionData('getPrizePackage', [i, j]);
-				result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-				const prizePackage = lazyLottoIface.decodeFunctionResult('getPrizePackage', result);
+			const poolPrizeResults = prizeResultsByPool.get(pbd.index) || [];
+			for (const pr of poolPrizeResults) {
+				if (pr.error) continue;
+				const prizePackage = lazyLottoIface.decodeFunctionResult('getPrizePackage', pr.result);
 
 				const prizeTokenAddr = prizePackage[0].token;
 				const prizeTokenId = prizeTokenAddr === '0x0000000000000000000000000000000000000000'
@@ -392,7 +438,8 @@ async function getMasterInfo() {
 					nftTokens: nftTokensWithDetails,
 				};
 				pool.prizes.push(prize);
-			} pools.push(pool);
+			}
+			pools.push(pool);
 		}
 
 		// Display all pools
@@ -452,48 +499,39 @@ async function getMasterInfo() {
 			console.log('└────────────────────────────────────────────────────────\n');
 		}
 
-		// Pool Manager Configuration
-		if (poolManagerId) {
-			try {
-				const poolManagerJson = JSON.parse(
-					fs.readFileSync('./artifacts/contracts/LazyLottoPoolManager.sol/LazyLottoPoolManager.json'),
-				);
-				const poolManagerIface = new ethers.Interface(poolManagerJson.abi);
+		// Pool Manager Configuration (reuse poolManagerIface + resolvedPoolManagerId from bonus section)
+		try {
+			console.log('═══════════════════════════════════════════════════════════');
+			console.log('  POOL MANAGER CONFIGURATION');
+			console.log('═══════════════════════════════════════════════════════════');
+			console.log(`  Pool Manager:           ${resolvedPoolManagerId.toString()}`);
 
-				console.log('═══════════════════════════════════════════════════════════');
-				console.log('  POOL MANAGER CONFIGURATION');
-				console.log('═══════════════════════════════════════════════════════════');
+			// Batch all pool manager config queries in parallel
+			const pmConfigQueries = [
+				{ contractId: resolvedPoolManagerId, encoded: poolManagerIface.encodeFunctionData('getCreationFees'), label: 'getCreationFees' },
+				{ contractId: resolvedPoolManagerId, encoded: poolManagerIface.encodeFunctionData('platformProceedsPercentage'), label: 'platformProceedsPercentage' },
+				{ contractId: resolvedPoolManagerId, encoded: poolManagerIface.encodeFunctionData('totalGlobalPools'), label: 'totalGlobalPools' },
+				{ contractId: resolvedPoolManagerId, encoded: poolManagerIface.encodeFunctionData('totalCommunityPools'), label: 'totalCommunityPools' },
+			];
 
-				// Get creation fees
-				encodedCommand = poolManagerIface.encodeFunctionData('getCreationFees');
-				result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-				const creationFees = poolManagerIface.decodeFunctionResult('getCreationFees', result);
+			const pmConfigResults = await batchMirrorQuery(env, pmConfigQueries, operatorId, { concurrency: 25 });
 
-				// Get platform fee percentage
-				encodedCommand = poolManagerIface.encodeFunctionData('platformProceedsPercentage');
-				result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-				const platformPercent = poolManagerIface.decodeFunctionResult('platformProceedsPercentage', result);
+			const creationFees = poolManagerIface.decodeFunctionResult('getCreationFees', pmConfigResults[0].result);
+			const platformPercent = poolManagerIface.decodeFunctionResult('platformProceedsPercentage', pmConfigResults[1].result);
+			const totalGlobal = poolManagerIface.decodeFunctionResult('totalGlobalPools', pmConfigResults[2].result);
+			const totalCommunity = poolManagerIface.decodeFunctionResult('totalCommunityPools', pmConfigResults[3].result);
 
-				// Get pool counts
-				encodedCommand = poolManagerIface.encodeFunctionData('totalGlobalPools');
-				result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-				const totalGlobal = poolManagerIface.decodeFunctionResult('totalGlobalPools', result);
-
-				encodedCommand = poolManagerIface.encodeFunctionData('totalCommunityPools');
-				result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-				const totalCommunity = poolManagerIface.decodeFunctionResult('totalCommunityPools', result);
-
-				console.log('  Creation Fees:');
-				console.log(`    - HBAR: ${new Hbar(creationFees[0], HbarUnit.Tinybar).toString()}`);
-				console.log(`    - LAZY: ${(Number(creationFees[1]) / (10 ** 8)).toFixed(8)} LAZY`);
-				console.log(`  Platform Fee:           ${platformPercent[0]}% (Pool Owner: ${100 - Number(platformPercent[0])}%)`);
-				console.log(`  Global Pools:           ${totalGlobal[0]}`);
-				console.log(`  Community Pools:        ${totalCommunity[0]}`);
-				console.log('═══════════════════════════════════════════════════════════\n');
-			}
-			catch (error) {
-				console.log('⚠️  Pool Manager info unavailable\n', error.message);
-			}
+			const lazyDecimals = parseInt(process.env.LAZY_DECIMALS ?? '1');
+			console.log('  Creation Fees:');
+			console.log(`    - HBAR: ${new Hbar(creationFees[0], HbarUnit.Tinybar).toString()}`);
+			console.log(`    - LAZY: ${(Number(creationFees[1]) / (10 ** lazyDecimals)).toFixed(lazyDecimals)} LAZY`);
+			console.log(`  Platform Fee:           ${platformPercent[0]}% (Pool Owner: ${100 - Number(platformPercent[0])}%)`);
+			console.log(`  Global Pools:           ${totalGlobal[0]}`);
+			console.log(`  Community Pools:        ${totalCommunity[0]}`);
+			console.log('═══════════════════════════════════════════════════════════\n');
+		}
+		catch (error) {
+			console.log('⚠️  Pool Manager info unavailable\n', error.message);
 		}
 
 		// Summary statistics

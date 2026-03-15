@@ -7,44 +7,23 @@
  * Usage: node scripts/interactions/LazyLotto/user/claimFromPrizeNFT.js [serial1,serial2,...]
  */
 
+require('dotenv').config();
 const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
 	TokenId,
 	HbarUnit,
 } = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const { associateTokensToAccount, setHbarAllowance } = require('../../../../utils/hederaHelpers');
-const { homebrewPopulateAccountNum, checkHbarAllowances } = require('../../../../utils/hederaMirrorHelpers');
-const { checkMirrorBalance } = require('../../../../utils/hederaMirrorHelpers');
+const { homebrewPopulateAccountNum, checkHbarAllowances, checkMirrorBalance } = require('../../../../utils/hederaMirrorHelpers');
 const { sleep } = require('@directus/sdk');
-require('dotenv').config();
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-const storageContractId = ContractId.fromString(process.env.LAZY_LOTTO_STORAGE);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
+const storageContractId = getContractId('LAZY_LOTTO_STORAGE');
 
 // Helper: Convert EVM address to Hedera ID
 async function convertToHederaId(evmAddress) {
@@ -63,24 +42,8 @@ async function claimFromPrizeNFT() {
 		// Get serials parameter
 		let serialsStr = process.argv[2];
 
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║           LazyLotto Claim from Prize NFTs                 ║');
@@ -90,13 +53,10 @@ async function claimFromPrizeNFT() {
 		console.log(`👤 User: ${operatorId.toString()}\n`);
 
 		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
+		const lazyLottoIface = loadInterface('LazyLotto');
 
 		// Import helpers
-		const { contractExecuteFunction, readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
+		const { contractExecuteFunction } = require('../../../../utils/solidityHelpers');
 		const { estimateGas } = require('../../../../utils/gasHelpers');
 		const { getSerialsOwned } = require('../../../../utils/hederaMirrorHelpers');
 
@@ -163,9 +123,8 @@ async function claimFromPrizeNFT() {
 
 		for (const serial of serials) {
 			// Query the prize data for this NFT
-			const encodedCommand = lazyLottoIface.encodeFunctionData('getPendingPrizesByNFT', [prizeNFTAddress, serial]);
-			const result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-			const pendingPrize = lazyLottoIface.decodeFunctionResult('getPendingPrizesByNFT', result)[0];
+			const pendingPrizeResult = await queryContract(env, contractId, lazyLottoIface, 'getPendingPrizesByNFT', [prizeNFTAddress, serial], operatorId);
+			const pendingPrize = pendingPrizeResult[0];
 
 			if (!pendingPrize.asNFT) {
 				console.error(`\n❌ Serial #${serial} is not a prize NFT (it may be a ticket)`);
@@ -265,8 +224,8 @@ async function claimFromPrizeNFT() {
 
 		// Confirm
 		console.log('⚠️  Prize NFTs will be wiped (destroyed) after claiming.');
-		const confirm = await prompt(`Claim prizes from ${serials.length} NFT(s)? (yes/no): `);
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt(`Claim prizes from ${serials.length} NFT(s)? (yes/no): `);
+		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Operation cancelled');
 			process.exit(0);
 		}

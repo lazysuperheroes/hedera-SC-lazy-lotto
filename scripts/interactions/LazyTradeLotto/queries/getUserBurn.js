@@ -9,14 +9,13 @@
  * Example: node queries/getUserBurn.js 0.0.123456 0x1234...abcd
  */
 
+require('dotenv').config();
 const {
 	AccountId,
 	ContractId,
 } = require('@hashgraph/sdk');
-require('dotenv').config();
-const fs = require('fs');
-const { ethers } = require('ethers');
-const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const { getArgFlag } = require('../../../../utils/nodeHelpers');
 const { homebrewPopulateAccountNum } = require('../../../../utils/hederaMirrorHelpers');
 
@@ -59,8 +58,7 @@ async function main() {
 	console.log('-Using Operator:', operatorId.toString());
 
 	// Import ABI
-	const ltlJSON = JSON.parse(fs.readFileSync(`./abi/${contractName}.json`));
-	const ltlIface = new ethers.Interface(ltlJSON);
+	const ltlIface = loadInterface(contractName);
 
 	const contractId = ContractId.fromString(args[0]);
 	let userAddress = args[1];
@@ -83,57 +81,41 @@ async function main() {
 	console.log('\nFetching burn information...\n');
 
 	// Get user's burn percentage
-	const userBurn = ltlIface.decodeFunctionResult(
-		'getBurnForUser',
-		await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			ltlIface.encodeFunctionData('getBurnForUser', [userAddress]),
-			operatorId,
-			false,
-		),
-	)[0];
+	const userBurnResult = await queryContract(env, contractId, ltlIface, 'getBurnForUser', [userAddress], operatorId);
+	const userBurn = userBurnResult[0];
 
 	// Get contract's default burn percentage
-	const contractBurn = ltlIface.decodeFunctionResult(
-		'burnPercentage',
-		await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			ltlIface.encodeFunctionData('burnPercentage'),
-			operatorId,
-			false,
-		),
-	)[0];
+	const contractBurnResult = await queryContract(env, contractId, ltlIface, 'burnPercentage', [], operatorId);
+	const contractBurn = contractBurnResult[0];
 
 	// Display Results
 	console.log('═══════════════════════════════════════════════════════════');
 	console.log('           User Burn Percentage Check');
 	console.log('═══════════════════════════════════════════════════════════\n');
 
-	console.log('👤 User Address:', userAddress);
+	console.log('User Address:', userAddress);
 	if (hederaId !== userAddress) {
 		console.log('   Hedera ID:', hederaId);
 	}
 
-	console.log('\n🔥 Burn Percentage:', Number(userBurn) + '%');
-	console.log('📋 Contract Default:', Number(contractBurn) + '%');
+	console.log('\nBurn Percentage:', Number(userBurn) + '%');
+	console.log('Contract Default:', Number(contractBurn) + '%');
 
 	if (Number(userBurn) === 0) {
-		console.log('\n✅ This user is an LSH NFT holder or has delegated access!');
-		console.log('   They receive ZERO burn on lottery winnings. 🎉');
+		console.log('\nThis user is an LSH NFT holder or has delegated access!');
+		console.log('   They receive ZERO burn on lottery winnings.');
 		console.log('\n   LSH NFT Benefits:');
-		console.log('   • Full prize payouts (0% burn)');
-		console.log('   • Valid for Gen1, Gen2, and Gen1 Mutant collections');
-		console.log('   • Includes direct ownership and delegated access');
+		console.log('   - Full prize payouts (0% burn)');
+		console.log('   - Valid for Gen1, Gen2, and Gen1 Mutant collections');
+		console.log('   - Includes direct ownership and delegated access');
 	}
 	else {
-		console.log('\n❌ This user is NOT an LSH NFT holder.');
+		console.log('\nThis user is NOT an LSH NFT holder.');
 		console.log(`   They will have ${Number(userBurn)}% burn applied to lottery winnings.`);
-		console.log('\n   💡 To get 0% burn, acquire LSH NFTs:');
-		console.log('   • LSH Gen1');
-		console.log('   • LSH Gen2');
-		console.log('   • LSH Gen1 Mutant');
+		console.log('\n   To get 0% burn, acquire LSH NFTs:');
+		console.log('   - LSH Gen1');
+		console.log('   - LSH Gen2');
+		console.log('   - LSH Gen1 Mutant');
 		console.log('   Or get delegated access via LazyDelegateRegistry');
 	}
 

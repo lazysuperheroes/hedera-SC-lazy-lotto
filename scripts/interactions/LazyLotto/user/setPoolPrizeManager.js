@@ -8,27 +8,22 @@
  *        If parameters not provided, will prompt for input
  */
 
+require('dotenv').config();
 const {
-	Client,
 	AccountId,
-	PrivateKey,
-	ContractId,
 	ContractExecuteTransaction,
 } = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
-require('dotenv').config();
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 
-const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
 const { homebrewPopulateAccountNum, EntityType } = require('../../../../utils/hederaMirrorHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const poolManagerId = ContractId.fromString(process.env.LAZY_LOTTO_POOL_MANAGER_ID);
-const lazyLottoId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
+const { operatorId, operatorKey, env } = getEnvConfig();
+const poolManagerId = getContractId('LAZY_LOTTO_POOL_MANAGER_ID');
+const lazyLottoId = getContractId('LAZY_LOTTO_CONTRACT_ID');
 
 async function convertToHederaId(evmAddress) {
 	if (!evmAddress.startsWith('0x')) return evmAddress;
@@ -43,42 +38,12 @@ async function convertToEvmAddress(accountId) {
 	return evmAddress;
 }
 
-function promptForInput(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise((resolve) => {
-		rl.question(question, (answer) => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
-
 async function setPoolPrizeManager(poolId, prizeManagerAccountId) {
 	let client;
 
 	try {
-		// Normalize environment name
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║              Set Pool Prize Manager                       ║');
@@ -88,19 +53,8 @@ async function setPoolPrizeManager(poolId, prizeManagerAccountId) {
 		console.log(`👤 Pool Owner: ${operatorId.toString()}\n`);
 
 		// Load interfaces
-		const poolManagerJson = JSON.parse(
-			fs.readFileSync(
-				'./artifacts/contracts/LazyLottoPoolManager.sol/LazyLottoPoolManager.json',
-			),
-		);
-		const poolManagerIface = new ethers.Interface(poolManagerJson.abi);
-
-		const lazyLottoJson = JSON.parse(
-			fs.readFileSync(
-				'./artifacts/contracts/LazyLotto.sol/LazyLotto.json',
-			),
-		);
-		const lazyLottoIface = new ethers.Interface(lazyLottoJson.abi);
+		const poolManagerIface = loadInterface('LazyLottoPoolManager');
+		const lazyLottoIface = loadInterface('LazyLotto');
 
 		// Get pool info
 		console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -108,17 +62,13 @@ async function setPoolPrizeManager(poolId, prizeManagerAccountId) {
 		console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
 		// Get pool name
-		let encodedCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [poolId]);
-		let result = await readOnlyEVMFromMirrorNode(env, lazyLottoId, encodedCommand, operatorId, false);
-		const poolInfo = lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', result);
-		const poolName = poolInfo[1];
+		const poolInfo = await queryContract(env, lazyLottoId, lazyLottoIface, 'getPoolBasicInfo', [poolId], operatorId);
+		const poolWinCID = poolInfo[1];
 
-		console.log(`   Name: "${poolName}"`);
+		console.log(`   Pool #${poolId} (Win CID: "${poolWinCID.substring(0, 20)}...")`);
 
 		// Verify ownership
-		encodedCommand = poolManagerIface.encodeFunctionData('getPoolOwner', [poolId]);
-		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const owner = poolManagerIface.decodeFunctionResult('getPoolOwner', result);
+		const owner = await queryContract(env, poolManagerId, poolManagerIface, 'getPoolOwner', [poolId], operatorId);
 		const ownerHederaId = await convertToHederaId(owner[0]);
 
 		console.log(`   Owner: ${ownerHederaId}`);
@@ -129,9 +79,7 @@ async function setPoolPrizeManager(poolId, prizeManagerAccountId) {
 		}
 
 		// Get current prize manager
-		encodedCommand = poolManagerIface.encodeFunctionData('getPoolPrizeManager', [poolId]);
-		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const currentPrizeManager = poolManagerIface.decodeFunctionResult('getPoolPrizeManager', result);
+		const currentPrizeManager = await queryContract(env, poolManagerId, poolManagerIface, 'getPoolPrizeManager', [poolId], operatorId);
 		const currentPrizeManagerHederaId = currentPrizeManager[0] && currentPrizeManager[0] !== '0x0000000000000000000000000000000000000000'
 			? await convertToHederaId(currentPrizeManager[0])
 			: 'Not Set';
@@ -148,8 +96,8 @@ async function setPoolPrizeManager(poolId, prizeManagerAccountId) {
 		console.log(`   Account: ${prizeManagerAccountId}\n`);
 
 		// Confirm
-		const confirm = await promptForInput('❓ Confirm setting new prize manager? (yes/no): ');
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt('❓ Confirm setting new prize manager? (yes/no): ');
+		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Operation cancelled.\n');
 			return;
 		}
@@ -162,7 +110,7 @@ async function setPoolPrizeManager(poolId, prizeManagerAccountId) {
 		const tx = await new ContractExecuteTransaction()
 			.setContractId(poolManagerId)
 			.setGas(300000)
-			.setFunction('setPoolPrizeManager', Buffer.from(encodedFunction.slice(2), 'hex'))
+			.setFunctionParameters(Buffer.from(encodedFunction.slice(2), 'hex'))
 			.execute(client);
 
 		const receipt = await tx.getReceipt(client);
@@ -180,12 +128,10 @@ async function setPoolPrizeManager(poolId, prizeManagerAccountId) {
 		console.log('✓ Verified New Prize Manager');
 		console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-		encodedCommand = poolManagerIface.encodeFunctionData('getPoolPrizeManager', [poolId]);
-		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const newPrizeManager = poolManagerIface.decodeFunctionResult('getPoolPrizeManager', result);
+		const newPrizeManager = await queryContract(env, poolManagerId, poolManagerIface, 'getPoolPrizeManager', [poolId], operatorId);
 		const newPrizeManagerHederaId = await convertToHederaId(newPrizeManager[0]);
 
-		console.log(`   Pool #${poolId}: "${poolName}"`);
+		console.log(`   Pool #${poolId}`);
 		console.log(`   Prize Manager: ${newPrizeManagerHederaId}\n`);
 
 		console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
@@ -214,11 +160,11 @@ async function main() {
 
 	// If not provided, prompt
 	if (!poolId) {
-		poolId = await promptForInput('Enter Pool ID: ');
+		poolId = await prompt('Enter Pool ID: ');
 	}
 
 	if (!prizeManagerAccountId) {
-		prizeManagerAccountId = await promptForInput('Enter Prize Manager Account ID (e.g., 0.0.12345): ');
+		prizeManagerAccountId = await prompt('Enter Prize Manager Account ID (e.g., 0.0.12345): ');
 	}
 
 	poolId = parseInt(poolId);

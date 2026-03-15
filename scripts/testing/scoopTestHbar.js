@@ -1,26 +1,14 @@
 const {
-	Client,
 	AccountId,
 	PrivateKey,
 	Hbar,
 	HbarUnit,
 } = require('@hashgraph/sdk');
-require('dotenv').config();
 const { getArgFlag, getArg } = require('../../utils/nodeHelpers');
 const readlineSync = require('readline-sync');
 const { checkMirrorHbarBalance } = require('../../utils/hederaMirrorHelpers');
 const { sweepHbar } = require('../../utils/hederaHelpers');
-
-let operatorId;
-let operatorKey;
-
-try {
-	operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-	operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-}
-catch (err) {
-	console.log('ERROR: Must specify PRIVATE_KEY & ACCOUNT_ID in the .env file');
-}
+const { getEnvConfig, createClient } = require('../../utils/clientFactory');
 
 async function scoopTestHbar() {
 	// check args for an account ot send to and a percentage of the total to send
@@ -66,8 +54,8 @@ async function scoopTestHbar() {
 	const balances = [];
 	const sendAmounts = [];
 
-	const client = Client.forTestnet();
-	client.setOperator(operatorId, operatorKey);
+	const { operatorId, operatorKey } = getEnvConfig();
+	const client = createClient('test', operatorId, operatorKey);
 
 	// get the balances of the accounts
 	for (let i = 0; i < scoopAccounts.length; i++) {

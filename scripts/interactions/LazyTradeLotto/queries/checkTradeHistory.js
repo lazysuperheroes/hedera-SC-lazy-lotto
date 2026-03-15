@@ -9,15 +9,15 @@
  * Example: node queries/checkTradeHistory.js 0.0.123456 0x1234...abcd 42 1000 true
  */
 
+require('dotenv').config();
 const {
 	AccountId,
 	ContractId,
 	TokenId,
 } = require('@hashgraph/sdk');
-require('dotenv').config();
-const fs = require('fs');
 const { ethers } = require('ethers');
-const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const { getArgFlag } = require('../../../../utils/nodeHelpers');
 
 const contractName = 'LazyTradeLotto';
@@ -49,8 +49,7 @@ async function main() {
 	console.log('-Using Operator:', operatorId.toString());
 
 	// Import ABI
-	const ltlJSON = JSON.parse(fs.readFileSync(`./abi/${contractName}.json`));
-	const ltlIface = new ethers.Interface(ltlJSON);
+	const ltlIface = loadInterface(contractName);
 
 	const contractId = ContractId.fromString(args[0]);
 	let tokenAddress = args[1];
@@ -84,44 +83,36 @@ async function main() {
 	console.log('\nChecking roll history...\n');
 
 	// Check if this hash exists in history mapping
-	const hasRolled = ltlIface.decodeFunctionResult(
-		'history',
-		await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			ltlIface.encodeFunctionData('history', [hash]),
-			operatorId,
-			false,
-		),
-	)[0];
+	const historyResult = await queryContract(env, contractId, ltlIface, 'history', [hash], operatorId);
+	const hasRolled = historyResult[0];
 
 	// Display Results
 	console.log('═══════════════════════════════════════════════════════════');
 	console.log('           Trade Roll History Check');
 	console.log('═══════════════════════════════════════════════════════════\n');
 
-	console.log('🎯 Trade Details:');
+	console.log('Trade Details:');
 	console.log('   NFT Contract:', tokenAddress);
 	console.log('   Serial:', serial);
 	console.log('   Nonce:', nonce);
-	console.log('   Participant:', buyer ? '🛒 Buyer' : '🏷️ Seller');
+	console.log('   Participant:', buyer ? 'Buyer' : 'Seller');
 
-	console.log('\n📊 Roll Status:', hasRolled ? '✅ ALREADY ROLLED' : '⏳ NOT YET ROLLED');
+	console.log('\nRoll Status:', hasRolled ? 'ALREADY ROLLED' : 'NOT YET ROLLED');
 
 	if (hasRolled) {
-		console.log('\n❌ This trade has already been rolled by this participant.');
+		console.log('\nThis trade has already been rolled by this participant.');
 		console.log('   Further attempts will revert with AlreadyRolled() error.');
 		console.log('   Each trade can only be rolled once per participant.');
 	}
 	else {
-		console.log('\n✅ This trade has not been rolled yet by this participant.');
+		console.log('\nThis trade has not been rolled yet by this participant.');
 		console.log('   This participant can roll the lottery for this trade.');
 		console.log('   (Requires valid signature from systemWallet)');
 	}
 
-	console.log('\n💡 Note: Each trade has two potential rolls:');
-	console.log('   • One for the buyer');
-	console.log('   • One for the seller');
+	console.log('\nNote: Each trade has two potential rolls:');
+	console.log('   - One for the buyer');
+	console.log('   - One for the seller');
 	console.log('   Use this tool separately to check each participant.');
 
 	console.log('\n═══════════════════════════════════════════════════════════\n');

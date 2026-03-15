@@ -1,6 +1,6 @@
 {
   "name": "@lazysuperheroes/lazy-lotto",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "LazyLotto and LazyTradeLotto lottery systems on Hedera - ABIs and CLI tools",
   "main": "index.js",
   "bin": {

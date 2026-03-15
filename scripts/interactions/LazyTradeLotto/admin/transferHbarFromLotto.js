@@ -18,18 +18,16 @@
  *   --signers=Alice,Bob,Charlie     Label signers for clarity
  */
 
+require('dotenv').config();
 const {
-	Client,
 	AccountId,
-	PrivateKey,
 	ContractId,
 	Hbar,
 	HbarUnit,
 } = require('@hashgraph/sdk');
-require('dotenv').config();
-const fs = require('fs');
-const { ethers } = require('ethers');
 const readlineSync = require('readline-sync');
+const { createClient, getEnvConfig } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
 const { getArgFlag } = require('../../../../utils/nodeHelpers');
 const { checkMirrorHbarBalance } = require('../../../../utils/hederaMirrorHelpers');
 const {
@@ -38,20 +36,9 @@ const {
 	displayMultiSigBanner,
 } = require('../../../../utils/scriptHelpers');
 
-// Get operator from .env file
-let operatorKey;
-let operatorId;
-try {
-	operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-	operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-}
-catch {
-	console.log('ERROR: Must specify PRIVATE_KEY & ACCOUNT_ID in the .env file');
-}
-
 const contractName = 'LazyTradeLotto';
 
-const env = process.env.ENVIRONMENT ?? null;
+const { operatorId, operatorKey, env } = getEnvConfig();
 let client;
 
 const main = async () => {
@@ -60,49 +47,10 @@ const main = async () => {
 		process.exit(0);
 	}
 
-	// configure the client object
-	if (
-		operatorKey === undefined ||
-		operatorKey == null ||
-		operatorId === undefined ||
-		operatorId == null
-	) {
-		console.log(
-			'Environment required, please specify PRIVATE_KEY & ACCOUNT_ID in the .env file',
-		);
-		process.exit(1);
-	}
-
 	console.log('\n-Using ENVIRONMENT:', env);
 
-	// Normalize environment name
-	const envUpper = env.toUpperCase();
-
-	if (envUpper === 'TEST' || envUpper === 'TESTNET') {
-		client = Client.forTestnet();
-		console.log('Using *TESTNET*');
-	}
-	else if (envUpper === 'MAIN' || envUpper === 'MAINNET') {
-		client = Client.forMainnet();
-		console.log('Using *MAINNET*');
-	}
-	else if (envUpper === 'PREVIEW' || envUpper === 'PREVIEWNET') {
-		client = Client.forPreviewnet();
-		console.log('Using *PREVIEWNET*');
-	}
-	else if (envUpper === 'LOCAL') {
-		const node = { '127.0.0.1:50211': new AccountId(3) };
-		client = Client.forNetwork(node).setMirrorNetwork('127.0.0.1:5600');
-		console.log('Using *LOCAL*');
-	}
-	else {
-		console.log(
-			'ERROR: Must specify either MAIN/MAINNET, TEST/TESTNET, PREVIEW/PREVIEWNET, or LOCAL as environment in .env file',
-		);
-		return;
-	}
-
-	client.setOperator(operatorId, operatorKey);
+	// Initialize client
+	client = createClient(env, operatorId, operatorKey);
 
 	const args = process.argv.slice(2).filter(arg => !arg.startsWith('--'));
 	if (args.length !== 3 || getArgFlag('h')) {
@@ -115,14 +63,8 @@ const main = async () => {
 		return;
 	}
 
-	// import ABI
-	const ltlJSON = JSON.parse(
-		fs.readFileSync(
-			`./abi/${contractName}.json`,
-		),
-	);
-
-	const ltlIface = new ethers.Interface(ltlJSON);
+	// Import ABI
+	const ltlIface = loadInterface(contractName);
 
 	const contractId = ContractId.fromString(args[0]);
 	const receiverAccount = AccountId.fromString(args[1]);

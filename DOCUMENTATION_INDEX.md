@@ -137,9 +137,15 @@ Community Pool Owner (Any User)
 
 **Token Approvals:**
 ```javascript
-// IMPORTANT: Approve storage contract, not LazyLotto
+// $LAZY → LazyGasStation (always — it handles burn logic)
+const gasStationAddress = await lazyLotto.lazyGasStation();
+await lazyToken.approve(gasStationAddress, amount);
+
+// Other tokens/NFTs → Storage Contract
 const storageAddress = await lazyLotto.storageContract();
-await token.approve(storageAddress, amount);
+await otherToken.approve(storageAddress, amount);
+
+// HBAR → no allowance needed (sent as msg.value)
 ```
 
 **Gas Estimation:**

@@ -493,7 +493,7 @@ All scripts follow consistent Hedera SDK patterns:
 ## Troubleshooting
 
 ### "You are not an admin"
-- Verify your account is admin via `readOnlyEVMFromMirrorNode()`
+- Verify your account is admin via `queryContract()`
 - Check `.env` has correct `ACCOUNT_ID` and `PRIVATE_KEY`
 
 ### "Insufficient balance"
@@ -507,7 +507,7 @@ All scripts follow consistent Hedera SDK patterns:
 
 ### "Pool does not exist"
 - Verify pool ID via `poolInfo.js`
-- Check pool count via `readOnlyEVMFromMirrorNode()`
+- Check pool count via `queryContract()`
 
 ### "Mirror node timing issues"
 - Wait 5-10 seconds between state-changing operations

@@ -17,18 +17,14 @@
  *   --signers=Alice,Bob,Charlie     Label signers for clarity
  */
 
-const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
-} = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
 require('dotenv').config();
-
-const { homebrewPopulateAccountNum } = require('../../../../utils/hederaMirrorHelpers');
+const { AccountId, ContractId } = require('@hashgraph/sdk');
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
+const { homebrewPopulateAccountNum, EntityType } = require('../../../../utils/hederaMirrorHelpers');
+const { estimateGas } = require('../../../../utils/gasHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
@@ -36,25 +32,8 @@ const {
 } = require('../../../../utils/scriptHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const poolManagerId = ContractId.fromString(process.env.LAZY_LOTTO_POOL_MANAGER_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const poolManagerId = getContractId('LAZY_LOTTO_POOL_MANAGER_ID');
 
 // Helper: Sleep
 function sleep(ms) {
@@ -93,24 +72,8 @@ async function transferPoolOwnership() {
 			}
 		}
 
-		// Normalize environment name
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║         LazyLotto Transfer Pool Ownership                 ║');
@@ -122,13 +85,7 @@ async function transferPoolOwnership() {
 		displayMultiSigBanner();
 
 		// Load PoolManager ABI
-		const poolManagerJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLottoPoolManager.sol/LazyLottoPoolManager.json'),
-		);
-		const poolManagerIface = new ethers.Interface(poolManagerJson.abi);
-
-		const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
-		const { estimateGas } = require('../../../../utils/gasHelpers');
+		const poolManagerIface = loadInterface('LazyLottoPoolManager');
 
 		// Prompt for pool ID if not provided
 		if (!poolIdInput) {
@@ -143,9 +100,8 @@ async function transferPoolOwnership() {
 
 		// Get current pool owner
 		console.log('🔍 Fetching current pool owner...\n');
-		let encodedCommand = poolManagerIface.encodeFunctionData('getPoolOwner', [poolId]);
-		let result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const currentOwnerAddress = poolManagerIface.decodeFunctionResult('getPoolOwner', result)[0];
+		const currentOwnerResult = await queryContract(env, poolManagerId, poolManagerIface, 'getPoolOwner', [poolId], operatorId);
+		const currentOwnerAddress = currentOwnerResult[0];
 		const currentOwner = await convertToHederaId(currentOwnerAddress);
 
 		// Check if it's a global pool (no owner)
@@ -154,12 +110,20 @@ async function transferPoolOwnership() {
 			process.exit(1);
 		}
 
+		// Resolve LazyLotto address from PoolManager for isAdmin check
+		const lazyLottoAddrResult = await queryContract(env, poolManagerId, poolManagerIface, 'lazyLotto', [], operatorId);
+		const lazyLottoAddr = lazyLottoAddrResult[0];
+		const lazyLottoHederaId = await homebrewPopulateAccountNum(env, lazyLottoAddr, EntityType.CONTRACT);
+		const lazyLottoId = ContractId.fromString(lazyLottoHederaId);
+
+		// Load LazyLotto ABI for isAdmin check
+		const lazyLottoIface = loadInterface('LazyLotto');
+
 		// Check if operator is current owner or admin
 		const isCurrentOwner = currentOwnerAddress.toLowerCase() === operatorId.toSolidityAddress().toLowerCase();
 
-		encodedCommand = poolManagerIface.encodeFunctionData('isAdmin', [operatorId.toSolidityAddress()]);
-		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const isAdmin = poolManagerIface.decodeFunctionResult('isAdmin', result)[0];
+		const isAdminResult = await queryContract(env, lazyLottoId, lazyLottoIface, 'isAdmin', [operatorId.toSolidityAddress()], operatorId);
+		const isAdmin = isAdminResult[0];
 
 		if (!isCurrentOwner && !isAdmin) {
 			console.error('❌ You are not the pool owner or an admin');
@@ -263,9 +227,8 @@ async function transferPoolOwnership() {
 
 		// Verify new owner
 		console.log('🔍 Verifying new owner...\n');
-		encodedCommand = poolManagerIface.encodeFunctionData('getPoolOwner', [poolId]);
-		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const verifyOwnerAddress = poolManagerIface.decodeFunctionResult('getPoolOwner', result)[0];
+		const verifyResult = await queryContract(env, poolManagerId, poolManagerIface, 'getPoolOwner', [poolId], operatorId);
+		const verifyOwnerAddress = verifyResult[0];
 		const verifyOwner = await convertToHederaId(verifyOwnerAddress);
 
 		console.log('═══════════════════════════════════════════════════════════');

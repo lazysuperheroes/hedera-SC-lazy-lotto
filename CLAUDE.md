@@ -124,16 +124,26 @@ See `scripts/interactions/README.md` for complete script documentation (41 scrip
 
 **Location**: `utils/` folder contains shared helpers used across scripts and tests
 
-Key modules:
+**CLI Infrastructure** (shared across all scripts):
+- `clientFactory.js` - `createClient()`, `getEnvConfig()`, `getContractId()` - centralized Hedera client initialization
+- `abiLoader.js` - `loadInterface()` - cached ABI loading from abi/ or artifacts/
+- `queryHelpers.js` - `queryContract()`, `batchQueryContract()` - one-line read-only contract queries
+- `promptHelpers.js` - `prompt()`, `confirm()` - shared readline prompts
+- `addressHelpers.js` - `convertToHederaId()`, `hbarToTinybarsBigInt()`, `tokenToBaseUnits()` - conversion helpers
+- `tokenHelpers.js` - `getTokenDecimals()`, `getLazyDecimals()` - dynamic token decimal lookup
+- `scriptHelpers.js` - `executeContractFunction()` - multi-sig aware contract execution
+- `index.js` - barrel re-export of all utilities
+
+**Domain Helpers** (specialized functionality):
 - `hederaHelpers.js` - Account creation, token operations, NFT minting
 - `hederaMirrorHelpers.js` - Mirror node API queries for events/transactions
 - `transactionHelpers.js` - Transaction building and execution wrappers
-- `solidityHelpers.js` - ABI encoding/decoding, contract interaction
+- `solidityHelpers.js` - Low-level ABI encoding/decoding, contract interaction
 - `gasHelpers.js` - Gas estimation and management
 - `nodeHelpers.js` - Hedera node connection and client setup
 - `LazyNFTStakingHelper.js` / `LazyFarmingHelper.js` - Legacy staking system utilities
 
-**Pattern**: Scripts in `scripts/interactions/` import from utils, initialize Hedera client, load contract ABIs, and execute contract calls using Hedera SDK's `ContractExecuteTransaction`.
+**Pattern**: Scripts import from `utils/clientFactory`, `utils/abiLoader`, `utils/queryHelpers`, etc. to eliminate boilerplate. A typical script uses `getEnvConfig()` + `createClient()` + `loadInterface()` + `queryContract()` for setup, then focuses on business logic.
 
 ## Testing Architecture
 
@@ -177,7 +187,7 @@ LAZY_SCT_CONTRACT_ID=0.0.xxxxx  # LazySecureTrade (triggers TradeLotto)
 
 # Token configuration
 LAZY_TOKEN_ID=0.0.xxxxx         # $LAZY token ID
-LAZY_DECIMALS=8
+LAZY_DECIMALS=1
 LSH_GEN1_TOKEN_ID=0.0.xxxxx     # LSH NFT collections for benefits
 LSH_GEN2_TOKEN_ID=0.0.xxxxx
 LSH_GEN1_MUTANT_TOKEN_ID=0.0.xxxxx
@@ -508,7 +518,7 @@ npm test -- test/multiKeyType.test.js
 
 ## Common Pitfalls
 
-1. **Allowances**: Users must approve LazyLottoStorage address (NOT LazyLotto address) for token spending
+1. **Allowances**: $LAZY allowances go to **LazyGasStation** (it handles burn logic). All other fungible token and NFT allowances go to **LazyLottoStorage** (NOT LazyLotto). HBAR requires no allowance (sent as msg.value).
 2. **Token Association**: Always associate tokens before attempting transfers on Hedera
 3. **Contract Size**: When modifying LazyLotto, watch contract size (23.782KB / 24KB). May need to extract more logic to libraries.
 4. **Signature Validation**: LazyTradeLotto rolls require valid systemWallet signature with correct nonce + trade parameters

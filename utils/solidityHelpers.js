@@ -419,6 +419,52 @@ function sleep(ms) {
 	return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/**
+ * Execute multiple mirror node read-only queries in parallel with throttling.
+ * Prevents overwhelming the mirror node while dramatically improving latency
+ * for scripts that need many sequential queries.
+ *
+ * @param {string} env - Environment (testnet, mainnet, etc.)
+ * @param {Array<{contractId: ContractId, encoded: string, label?: string}>} queries
+ *   Array of queries to execute. Each must have contractId and encoded calldata.
+ * @param {AccountId|string} from - The account making the queries
+ * @param {Object} [options]
+ * @param {number} [options.concurrency=25] - Max concurrent requests (1-50)
+ * @param {boolean} [options.estimate=false] - Whether to estimate gas
+ * @param {number} [options.gas=300000] - Gas limit per call
+ * @returns {Promise<Array<{result: string|null, error: Error|null, label?: string, index: number}>>}
+ */
+async function batchMirrorQuery(env, queries, from, options = {}) {
+	const { concurrency = 25, estimate = false, gas = 300_000 } = options;
+	const clampedConcurrency = Math.min(Math.max(concurrency, 1), 50);
+	const results = new Array(queries.length);
+	let nextIndex = 0;
+
+	async function worker() {
+		while (nextIndex < queries.length) {
+			const idx = nextIndex++;
+			const q = queries[idx];
+			try {
+				const result = await readOnlyEVMFromMirrorNode(
+					env, q.contractId, q.encoded, from, estimate, gas,
+				);
+				results[idx] = { result, error: null, label: q.label, index: idx };
+			}
+			catch (error) {
+				results[idx] = { result: null, error, label: q.label, index: idx };
+			}
+		}
+	}
+
+	const workers = [];
+	for (let i = 0; i < Math.min(clampedConcurrency, queries.length); i++) {
+		workers.push(worker());
+	}
+	await Promise.all(workers);
+
+	return results;
+}
+
 module.exports = {
 	parseError,
 	parseErrorTransactionId,
@@ -426,6 +472,7 @@ module.exports = {
 	contractExecuteFunction,
 	useSetter,
 	readOnlyEVMFromMirrorNode,
+	batchMirrorQuery,
 	linkBytecode,
 	contractDeployFunction,
 	getBaseURL,

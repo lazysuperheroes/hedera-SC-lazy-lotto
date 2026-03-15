@@ -21,24 +21,22 @@
  *   --signers=Alice,Bob,Charlie     Label signers for clarity
  */
 
+require('dotenv').config();
 const {
-	Client,
-	AccountId,
-	PrivateKey,
 	ContractId,
 	Hbar,
 	HbarUnit,
 	TokenId,
 } = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
-require('dotenv').config();
-
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const { getTokenDetails, checkMirrorBalance, checkMirrorHbarBalance, getSerialsOwned, checkFTAllowances, getNFTApprovedForAllAllowances } = require('../../../../utils/hederaMirrorHelpers');
 const { homebrewPopulateAccountNum, EntityType } = require('../../../../utils/hederaMirrorHelpers');
 const { setFTAllowance, setNFTAllowanceAll } = require('../../../../utils/hederaHelpers');
 const { sleep } = require('../../../../utils/nodeHelpers');
+const { estimateGas } = require('../../../../utils/gasHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
@@ -46,25 +44,8 @@ const {
 } = require('../../../../utils/scriptHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
 
 // Helper: Convert address formats
 function convertToEvmAddress(hederaId) {
@@ -112,24 +93,8 @@ async function addPrizePackage() {
 			process.exit(1);
 		}
 
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║         LazyLotto Add Prize Package (Admin)              ║');
@@ -142,64 +107,68 @@ async function addPrizePackage() {
 		displayMultiSigBanner();
 
 		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
+		const lazyLottoIface = loadInterface('LazyLotto');
 
-		// Import helpers
-		const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
-
-		// Check admin or prize manager role
-		console.log('🔍 Verifying permissions...');
+		// Fetch contract dependencies (poolManager, lazyToken, gasStation, storage)
+		console.log('🔍 Fetching contract dependencies...');
 		const userEvmAddress = '0x' + operatorId.toSolidityAddress();
 
-		let encodedCommand = lazyLottoIface.encodeFunctionData('isAdmin', [userEvmAddress]);
-		let result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const hasAdmin = lazyLottoIface.decodeFunctionResult('isAdmin', result);
+		const poolManagerAddrResult = await queryContract(env, contractId, lazyLottoIface, 'poolManager', [], operatorId);
+		const poolManagerAddr = poolManagerAddrResult[0];
+		const poolManagerIdStr = await convertToHederaId(poolManagerAddr, EntityType.CONTRACT);
 
-		encodedCommand = lazyLottoIface.encodeFunctionData('isPrizeManager', [userEvmAddress]);
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const isPrizeManager = lazyLottoIface.decodeFunctionResult('isPrizeManager', result);
-
-		if (!hasAdmin[0] && !isPrizeManager[0]) {
-			console.error('❌ You do not have ADMIN or PRIZE_MANAGER role');
-			process.exit(1);
-		}
-
-		console.log(`✅ Role verified: ${hasAdmin[0] ? 'ADMIN' : 'PRIZE_MANAGER'}\n`);
-
-		// Get LAZY token and storage contract addresses
-		console.log('🔍 Fetching contract dependencies...');
-
-		encodedCommand = lazyLottoIface.encodeFunctionData('lazyToken');
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const lazyTokenAddrResult = lazyLottoIface.decodeFunctionResult('lazyToken', result);
+		const lazyTokenAddrResult = await queryContract(env, contractId, lazyLottoIface, 'lazyToken', [], operatorId);
 		const lazyTokenAddr = lazyTokenAddrResult[0];
 		const lazyTokenId = await convertToHederaId(lazyTokenAddr, EntityType.TOKEN);
 
-		encodedCommand = lazyLottoIface.encodeFunctionData('lazyGasStation');
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const lazyGasStationAddrResult = lazyLottoIface.decodeFunctionResult('lazyGasStation', result);
+		const lazyGasStationAddrResult = await queryContract(env, contractId, lazyLottoIface, 'lazyGasStation', [], operatorId);
 		const lazyGasStationAddr = lazyGasStationAddrResult[0];
 		const lazyGasStationId = await convertToHederaId(lazyGasStationAddr, EntityType.CONTRACT);
 
-		encodedCommand = lazyLottoIface.encodeFunctionData('storageContract');
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const storageAddrResult = lazyLottoIface.decodeFunctionResult('storageContract', result);
+		const storageAddrResult = await queryContract(env, contractId, lazyLottoIface, 'storageContract', [], operatorId);
 		const storageAddr = storageAddrResult[0];
 		const storageId = await convertToHederaId(storageAddr, EntityType.CONTRACT);
 
-		console.log(`✅ LAZY Token: ${lazyTokenId}`);
-		console.log(`✅ LazyGasStation: ${lazyGasStationId}`);
-		console.log(`✅ Storage: ${storageId}\n`);
+		console.log(`✅ Pool Manager:  ${poolManagerIdStr}`);
+		console.log(`✅ LAZY Token:    ${lazyTokenId}`);
+		console.log(`✅ LazyGasStation:${lazyGasStationId}`);
+		console.log(`✅ Storage:       ${storageId}\n`);
+
+		// Load PoolManager ABI and check canAddPrizes (covers admin, global prize manager, pool owner, pool prize manager)
+		console.log('🔍 Verifying permissions...');
+		const poolManagerIface = loadInterface('LazyLottoPoolManager');
+		const poolManagerContractId = ContractId.fromString(poolManagerIdStr);
+
+		// canAddPrizes needs a poolId — use the one from the CLI arg or prompt (captured below in outer scope)
+		// We do a preliminary check against poolId=0 for global admins / global prize managers first;
+		// the pool-specific check happens again after poolId is known.
+		const canAddGlobalResult = await queryContract(env, poolManagerContractId, poolManagerIface, 'canAddPrizes', [0, userEvmAddress], operatorId);
+		const canAddGlobal = canAddGlobalResult[0];
+
+		if (!canAddGlobal) {
+			console.error('❌ You do not have permission to add prizes (not an admin or global prize manager)');
+			console.error('   Pool-specific owners/managers are validated after pool selection.');
+			// Don't exit — pool-specific check will catch it after poolId is known
+		}
+		else {
+			console.log('✅ Permission verified (admin or global prize manager)\n');
+		}
+
+		// Pool-specific permission check (covers pool owner and pool prize manager too)
+		if (!canAddGlobal) {
+			const canAddPoolResult = await queryContract(env, poolManagerContractId, poolManagerIface, 'canAddPrizes', [poolId, userEvmAddress], operatorId);
+			const canAddPool = canAddPoolResult[0];
+			if (!canAddPool) {
+				console.error(`❌ You do not have permission to add prizes to pool #${poolId}`);
+				process.exit(1);
+			}
+			console.log(`✅ Permission verified (pool #${poolId} owner or prize manager)\n`);
+		}
 
 		// Get pool details - query individual fields to avoid large response issues
 		// Check if pool is closed
-		encodedCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [poolId]);
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const [, , , , prizeCount, , poolTokenId, poolPaused, poolClosed] =
-			lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', result);
+		const poolBasicInfoResult = await queryContract(env, contractId, lazyLottoIface, 'getPoolBasicInfo', [poolId], operatorId);
+		const [, , , , prizeCount, , poolTokenId, poolPaused, poolClosed] = poolBasicInfoResult;
 
 		if (poolClosed) {
 			console.error('❌ Pool is closed. Cannot add prizes.');
@@ -218,10 +187,10 @@ async function addPrizePackage() {
 		const prizeType = await prompt('Add (1) Single prize package or (2) Multiple fungible prizes? (1/2): ');
 
 		if (prizeType === '2') {
-			await addMultipleFungiblePrizes(client, lazyLottoIface, poolId, lazyTokenId, lazyGasStationId, storageId);
+			await addMultipleFungiblePrizes(client, lazyLottoIface, poolId, lazyTokenId, lazyGasStationId, storageId, poolManagerIface, poolManagerContractId, userEvmAddress);
 		}
 		else {
-			await addSinglePrizePackage(client, lazyLottoIface, poolId, lazyTokenId, lazyGasStationId, storageId);
+			await addSinglePrizePackage(client, lazyLottoIface, poolId, lazyTokenId, lazyGasStationId, storageId, poolManagerIface, poolManagerContractId, userEvmAddress);
 		}
 
 	}
@@ -240,8 +209,6 @@ async function addPrizePackage() {
 }
 
 async function addSinglePrizePackage(client, lazyLottoIface, poolId, lazyTokenId, lazyGasStationId, storageId) {
-	const { estimateGas } = require('../../../../utils/gasHelpers');
-
 	console.log('\n═══════════════════════════════════════════════════════════');
 	console.log('  SINGLE PRIZE PACKAGE');
 	console.log('═══════════════════════════════════════════════════════════\n');
@@ -433,7 +400,7 @@ async function addSinglePrizePackage(client, lazyLottoIface, poolId, lazyTokenId
 			for (const nftTokenAddr of nftTokens) {
 				const tokenId = await convertToHederaId(nftTokenAddr, EntityType.TOKEN);
 				// Check if allowance exists for this spender and if the token is already approved
-				const spenderAllowances = allowanceInPlace[storageIdString] || [];
+				const spenderAllowances = allowanceInPlace.get(storageIdString) || [];
 				if (!spenderAllowances.includes(tokenId.toString())) {
 					nftTokenIdList.push(TokenId.fromString(tokenId));
 				}
@@ -537,7 +504,7 @@ async function addSinglePrizePackage(client, lazyLottoIface, poolId, lazyTokenId
 		functionName: 'addPrizePackage',
 		params: [poolId, ftToken, ftAmount, nftTokens, nftSerials],
 		gas: gasLimit,
-		payableAmount: new Hbar(payableAmount, HbarUnit.Tinybar).toTinybars().toString(),
+		payableAmount: new Hbar(payableAmount, HbarUnit.Tinybar),
 	});
 
 	if (!executionResult.success) {
@@ -552,8 +519,6 @@ async function addSinglePrizePackage(client, lazyLottoIface, poolId, lazyTokenId
 }
 
 async function addMultipleFungiblePrizes(client, lazyLottoIface, poolId, lazyTokenId, lazyGasStationId, storageId) {
-	const { estimateGas } = require('../../../../utils/gasHelpers');
-
 	console.log('\n═══════════════════════════════════════════════════════════');
 	console.log('  MULTIPLE FUNGIBLE PRIZES');
 	console.log('═══════════════════════════════════════════════════════════\n');
@@ -688,15 +653,16 @@ async function addMultipleFungiblePrizes(client, lazyLottoIface, poolId, lazyTok
 
 	await sleep(5000);
 
-	// Estimate gas
+	// Estimate gas — scale fallback with number of prizes (500k base + 50k per prize)
+	const fallbackGas = 500_000 + amounts.length * 50_000;
 	console.log('⛽ Estimating gas...');
 	const gasInfo = await estimateGas(env, contractId, lazyLottoIface, operatorId, 'addMultipleFungiblePrizes', [
 		poolId,
 		token,
 		amounts,
-	], 800000, payableAmount);
+	], fallbackGas, payableAmount);
 	const gasEstimate = gasInfo.gasLimit;
-	console.log(`   Gas: ~${gasEstimate}\n`);
+	console.log(`   Gas: ~${gasEstimate.toLocaleString()} (${amounts.length} prizes)\n`);
 
 	// Confirm
 	const confirm = await prompt('Proceed with adding prizes? (yes/no): ');
@@ -717,7 +683,7 @@ async function addMultipleFungiblePrizes(client, lazyLottoIface, poolId, lazyTok
 		functionName: 'addMultipleFungiblePrizes',
 		params: [poolId, token, amounts],
 		gas: gasLimit,
-		payableAmount: new Hbar(payableAmount, HbarUnit.Tinybar).toTinybars().toString(),
+		payableAmount: new Hbar(payableAmount, HbarUnit.Tinybar),
 	});
 
 	if (!executionResult.success) {

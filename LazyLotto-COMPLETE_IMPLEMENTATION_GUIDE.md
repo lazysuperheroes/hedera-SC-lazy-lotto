@@ -150,7 +150,7 @@ const totalCost = pool.entryFee * ticketCount;
 const burnPercentage = await lazyLotto.burnPercentage();
 const willBurn = (pool.feeToken === lazyTokenAddress && burnPercentage > 0);
 
-// 4. Approve tokens (to storage, not LazyLotto!)
+// 4. Approve tokens ($LAZY → GasStation, other tokens → Storage, NOT LazyLotto)
 const storageAddress = await lazyLotto.storageContract();
 if (pool.feeToken === address(0)) {
   // HBAR - send as msg.value

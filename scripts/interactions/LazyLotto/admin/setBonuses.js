@@ -22,18 +22,15 @@
  *   --signers=Alice,Bob,Charlie     Label signers for clarity
  */
 
-const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
-	TokenId,
-} = require('@hashgraph/sdk');
 const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
+const { TokenId } = require('@hashgraph/sdk');
 require('dotenv').config();
 
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
+const { convertToHederaId, EntityType } = require('../../../../utils/addressHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
@@ -41,28 +38,11 @@ const {
 } = require('../../../../utils/scriptHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
+const lazyDecimals = parseInt(process.env.LAZY_DECIMALS ?? '1');
 
 async function setBonuses() {
-	// Check for multi-sig help request
 	if (checkMultiSigHelp()) {
 		process.exit(0);
 	}
@@ -70,39 +50,27 @@ async function setBonuses() {
 	let client;
 
 	try {
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const envUpper = env.toUpperCase();
-
-		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║           LazyLotto Set Bonuses (Admin)                   ║');
 		console.log('╚════════════════════════════════════════════════════════════╝\n');
 		console.log(`📍 Environment: ${env.toUpperCase()}`);
-		console.log(`📄 Contract: ${contractId.toString()}\n`);
+		console.log(`📄 LazyLotto: ${contractId.toString()}\n`);
 
-		// Display multi-sig status if enabled
 		displayMultiSigBanner();
 
-		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
+		const lazyLottoIface = loadInterface('LazyLotto');
+
+		// Resolve PoolManager address from LazyLotto
+		console.log('🔍 Resolving PoolManager contract from LazyLotto...\n');
+		const pmResult = await queryContract(env, contractId, lazyLottoIface, 'poolManager', [], operatorId);
+		const poolManagerHederaId = await convertToHederaId(env, pmResult[0], EntityType.CONTRACT);
+		const { ContractId } = require('@hashgraph/sdk');
+		const poolManagerId = ContractId.fromString(poolManagerHederaId);
+		console.log(`📄 PoolManager: ${poolManagerId.toString()}\n`);
+
+		const poolManagerIface = loadInterface('LazyLottoPoolManager');
 
 		// Menu
 		console.log('Select bonus type to configure:');
@@ -192,8 +160,7 @@ async function setBonuses() {
 
 			let threshold;
 			try {
-				// LAZY has 8 decimals
-				threshold = ethers.parseUnits(thresholdStr, 8);
+				threshold = ethers.parseUnits(thresholdStr, lazyDecimals);
 			}
 			catch {
 				console.error('❌ Invalid threshold format');
@@ -211,7 +178,7 @@ async function setBonuses() {
 			params = [threshold, bps];
 
 			console.log('\nConfiguration:');
-			console.log(`  Threshold: ${ethers.formatUnits(threshold, 8)} LAZY`);
+			console.log(`  Threshold: ${ethers.formatUnits(threshold, lazyDecimals)} LAZY`);
 			console.log(`  Bonus: ${bps / 100}%\n`);
 			break;
 		}
@@ -222,18 +189,18 @@ async function setBonuses() {
 		}
 
 		// Confirm
-		const confirm = await prompt('Apply bonus configuration? (yes/no): ');
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const answer = await prompt('Apply bonus configuration? (yes/no): ');
+		if (answer.toLowerCase() !== 'yes' && answer.toLowerCase() !== 'y') {
 			console.log('\n❌ Operation cancelled');
 			process.exit(0);
 		}
 
-		// Execute
+		// Execute on PoolManager (bonus functions live there, not on LazyLotto)
 		console.log('\n🔄 Setting bonus...');
 
 		const executionResult = await executeContractFunction({
-			contractId: contractId,
-			iface: lazyLottoIface,
+			contractId: poolManagerId,
+			iface: poolManagerIface,
 			client: client,
 			functionName: functionName,
 			params: params,
@@ -266,5 +233,4 @@ async function setBonuses() {
 	}
 }
 
-// Run the script
 setBonuses();

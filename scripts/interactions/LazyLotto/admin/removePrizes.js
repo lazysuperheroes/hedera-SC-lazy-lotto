@@ -18,17 +18,14 @@
  *   --signers=Alice,Bob,Charlie     Label signers for clarity
  */
 
-const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
-} = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
 require('dotenv').config();
-
+const { ethers } = require('ethers');
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
+const { homebrewPopulateAccountNum } = require('../../../../utils/hederaMirrorHelpers');
+const { estimateGas } = require('../../../../utils/gasHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
@@ -36,25 +33,8 @@ const {
 } = require('../../../../utils/scriptHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
 
 // Helper: Convert EVM address to Hedera ID
 async function convertToHederaId(evmAddress) {
@@ -62,7 +42,6 @@ async function convertToHederaId(evmAddress) {
 		return 'HBAR';
 	}
 
-	const { homebrewPopulateAccountNum } = require('../../../../utils/hederaMirrorHelpers');
 	const hederaId = await homebrewPopulateAccountNum(env, evmAddress);
 	return hederaId ? hederaId.toString() : evmAddress;
 }
@@ -93,24 +72,8 @@ async function removePrizes() {
 			process.exit(1);
 		}
 
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║           LazyLotto Remove Prizes (Admin)                 ║');
@@ -123,29 +86,14 @@ async function removePrizes() {
 		displayMultiSigBanner();
 
 		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
-
-		// Import helpers
-		const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
-		const { estimateGas } = require('../../../../utils/gasHelpers');
+		const lazyLottoIface = loadInterface('LazyLotto');
 
 		// Check pool status
 		console.log('🔍 Checking pool status...');
 
-		const encodedQuery = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [poolId]);
-		const poolBasicInfo = await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			encodedQuery,
-			operatorId,
-			false,
-		);
+		const poolBasicInfo = await queryContract(env, contractId, lazyLottoIface, 'getPoolBasicInfo', [poolId], operatorId);
 		// eslint-disable-next-line no-unused-vars
-		const [ticketCID, winCID, winRate, entryFee, prizeCount, outstanding, poolTokenId, paused, closed, feeToken] =
-			lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', poolBasicInfo);
+		const [ticketCID, winCID, winRate, entryFee, prizeCount, outstanding, poolTokenId, paused, closed, feeToken] = poolBasicInfo;
 
 		if (!closed) {
 			console.error('\n❌ Pool is not closed. Must close pool first.');
@@ -161,15 +109,13 @@ async function removePrizes() {
 		}
 
 		console.log('\n🔍 Fetching prize details...');
-		const encodedPrizesQuery = lazyLottoIface.encodeFunctionData('getPrizes', [poolId]);
-		const prizesResult = await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			encodedPrizesQuery,
-			operatorId,
-			false,
-		);
-		const [prizes] = lazyLottoIface.decodeFunctionResult('getPrizes', prizesResult);
+		const totalPrizes = Number(prizeCount);
+		const prizes = [];
+		for (let i = 0; i < totalPrizes; i++) {
+			const prizeResult = await queryContract(env, contractId, lazyLottoIface, 'getPrizePackage', [poolId, i], operatorId);
+			const prize = prizeResult[0];
+			prizes.push(prize);
+		}
 
 		console.log(`\nPrizes to remove: ${prizes.length} packages\n`);
 
@@ -204,8 +150,8 @@ async function removePrizes() {
 
 		// Confirm
 		console.log('⚠️  This will remove ALL prizes from the pool and return them to your account.');
-		const confirm = await prompt(`Remove ${prizes.length} prize packages from pool #${poolId}? (yes/no): `);
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt(`Remove ${prizes.length} prize packages from pool #${poolId}? (yes/no): `);
+		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Operation cancelled');
 			process.exit(0);
 		}

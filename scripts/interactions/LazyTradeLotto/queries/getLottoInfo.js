@@ -14,15 +14,14 @@
  *   --json    Output results as JSON (for programmatic use)
  */
 
+require('dotenv').config();
 const {
 	AccountId,
 	ContractId,
 	TokenId,
 } = require('@hashgraph/sdk');
-require('dotenv').config();
-const fs = require('fs');
-const { ethers } = require('ethers');
-const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const { getArgFlag } = require('../../../../utils/nodeHelpers');
 const { getTokenDetails } = require('../../../../utils/hederaMirrorHelpers');
 
@@ -31,7 +30,7 @@ const outputJson = process.argv.includes('--json');
 
 const contractName = 'LazyTradeLotto';
 const LAZY_TOKEN_ID = process.env.LAZY_TOKEN_ID;
-const LAZY_DECIMAL = process.env.LAZY_DECIMALS ?? 1;
+const LAZY_DECIMAL = parseInt(process.env.LAZY_DECIMALS ?? '1');
 const env = process.env.ENVIRONMENT ?? null;
 
 let operatorId;
@@ -56,8 +55,7 @@ async function main() {
 	console.log('-Using Operator:', operatorId.toString());
 
 	// Import ABI
-	const ltlJSON = JSON.parse(fs.readFileSync(`./abi/${contractName}.json`));
-	const ltlIface = new ethers.Interface(ltlJSON);
+	const ltlIface = loadInterface(contractName);
 
 	const contractId = ContractId.fromString(args[0]);
 	console.log('-Using Contract:', contractId.toString(), '\n');
@@ -76,118 +74,37 @@ async function main() {
 	console.log('Fetching contract data...\n');
 
 	// LSH Tokens
-	const lshGen1 = ltlIface.decodeFunctionResult(
-		'LSH_GEN1',
-		await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			ltlIface.encodeFunctionData('LSH_GEN1'),
-			operatorId,
-			false,
-		),
-	)[0];
+	const lshGen1Result = await queryContract(env, contractId, ltlIface, 'LSH_GEN1', [], operatorId);
+	const lshGen1 = lshGen1Result[0];
 
-	const lshGen2 = ltlIface.decodeFunctionResult(
-		'LSH_GEN2',
-		await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			ltlIface.encodeFunctionData('LSH_GEN2'),
-			operatorId,
-			false,
-		),
-	)[0];
+	const lshGen2Result = await queryContract(env, contractId, ltlIface, 'LSH_GEN2', [], operatorId);
+	const lshGen2 = lshGen2Result[0];
 
-	const lshMutant = ltlIface.decodeFunctionResult(
-		'LSH_GEN1_MUTANT',
-		await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			ltlIface.encodeFunctionData('LSH_GEN1_MUTANT'),
-			operatorId,
-			false,
-		),
-	)[0];
+	const lshMutantResult = await queryContract(env, contractId, ltlIface, 'LSH_GEN1_MUTANT', [], operatorId);
+	const lshMutant = lshMutantResult[0];
 
 	// Connected Contracts
-	const prngContract = ltlIface.decodeFunctionResult(
-		'prngSystemContract',
-		await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			ltlIface.encodeFunctionData('prngSystemContract'),
-			operatorId,
-			false,
-		),
-	)[0];
+	const prngResult = await queryContract(env, contractId, ltlIface, 'prngSystemContract', [], operatorId);
+	const prngContract = prngResult[0];
 
-	const lgsContract = ltlIface.decodeFunctionResult(
-		'lazyGasStation',
-		await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			ltlIface.encodeFunctionData('lazyGasStation'),
-			operatorId,
-			false,
-		),
-	)[0];
+	const lgsResult = await queryContract(env, contractId, ltlIface, 'lazyGasStation', [], operatorId);
+	const lgsContract = lgsResult[0];
 
-	const ldrContract = ltlIface.decodeFunctionResult(
-		'lazyDelegateRegistry',
-		await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			ltlIface.encodeFunctionData('lazyDelegateRegistry'),
-			operatorId,
-			false,
-		),
-	)[0];
+	const ldrResult = await queryContract(env, contractId, ltlIface, 'lazyDelegateRegistry', [], operatorId);
+	const ldrContract = ldrResult[0];
 
 	// Configuration
-	const systemWallet = ltlIface.decodeFunctionResult(
-		'systemWallet',
-		await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			ltlIface.encodeFunctionData('systemWallet'),
-			operatorId,
-			false,
-		),
-	)[0];
+	const systemWalletResult = await queryContract(env, contractId, ltlIface, 'systemWallet', [], operatorId);
+	const systemWallet = systemWalletResult[0];
 
-	const burnPercentage = ltlIface.decodeFunctionResult(
-		'burnPercentage',
-		await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			ltlIface.encodeFunctionData('burnPercentage'),
-			operatorId,
-			false,
-		),
-	)[0];
+	const burnPercentageResult = await queryContract(env, contractId, ltlIface, 'burnPercentage', [], operatorId);
+	const burnPercentage = burnPercentageResult[0];
 
-	const isPaused = ltlIface.decodeFunctionResult(
-		'isPaused',
-		await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			ltlIface.encodeFunctionData('isPaused'),
-			operatorId,
-			false,
-		),
-	)[0];
+	const isPausedResult = await queryContract(env, contractId, ltlIface, 'isPaused', [], operatorId);
+	const isPaused = isPausedResult[0];
 
 	// Lottery Statistics
-	const lottoStats = ltlIface.decodeFunctionResult(
-		'getLottoStats',
-		await readOnlyEVMFromMirrorNode(
-			env,
-			contractId,
-			ltlIface.encodeFunctionData('getLottoStats'),
-			operatorId,
-			false,
-		),
-	);
+	const lottoStats = await queryContract(env, contractId, ltlIface, 'getLottoStats', [], operatorId);
 
 	// Process statistics
 	const jackpotPool = Number(lottoStats[0]) / (10 ** lazyTokenDecimals);
@@ -247,46 +164,46 @@ async function main() {
 		console.log('         LazyTradeLotto Contract Information');
 		console.log('═══════════════════════════════════════════════════════════\n');
 
-		console.log('📜 Contract Address:', contractId.toString());
-		console.log('⚙️  Status:', isPaused ? '🔴 PAUSED' : '🟢 ACTIVE');
-		console.log('🔥 Burn Percentage:', Number(burnPercentage) + '%');
-		console.log('✍️  System Wallet:', systemWallet);
+		console.log('Contract Address:', contractId.toString());
+		console.log('Status:', isPaused ? 'PAUSED' : 'ACTIVE');
+		console.log('Burn Percentage:', Number(burnPercentage) + '%');
+		console.log('System Wallet:', systemWallet);
 
 		console.log('\n───────────────────────────────────────────────────────────');
 		console.log('  LSH NFT Collections (0% Burn for Holders)');
 		console.log('───────────────────────────────────────────────────────────\n');
 
-		console.log('🎨 LSH Gen1:', TokenId.fromSolidityAddress(lshGen1).toString());
-		console.log('🎨 LSH Gen2:', TokenId.fromSolidityAddress(lshGen2).toString());
-		console.log('🎨 LSH Gen1 Mutant:', TokenId.fromSolidityAddress(lshMutant).toString());
+		console.log('LSH Gen1:', TokenId.fromSolidityAddress(lshGen1).toString());
+		console.log('LSH Gen2:', TokenId.fromSolidityAddress(lshGen2).toString());
+		console.log('LSH Gen1 Mutant:', TokenId.fromSolidityAddress(lshMutant).toString());
 
 		console.log('\n───────────────────────────────────────────────────────────');
 		console.log('  Connected Contracts');
 		console.log('───────────────────────────────────────────────────────────\n');
 
-		console.log('🎲 PRNG System:', ContractId.fromSolidityAddress(prngContract).toString());
-		console.log('⛽ Lazy Gas Station:', ContractId.fromSolidityAddress(lgsContract).toString());
-		console.log('📋 Lazy Delegate Registry:', ContractId.fromSolidityAddress(ldrContract).toString());
+		console.log('PRNG System:', ContractId.fromSolidityAddress(prngContract).toString());
+		console.log('Lazy Gas Station:', ContractId.fromSolidityAddress(lgsContract).toString());
+		console.log('Lazy Delegate Registry:', ContractId.fromSolidityAddress(ldrContract).toString());
 
 		console.log('\n───────────────────────────────────────────────────────────');
 		console.log('  Jackpot & Statistics');
 		console.log('───────────────────────────────────────────────────────────\n');
 
-		console.log('💰 Current Jackpot:', jackpotPool.toLocaleString(), '$LAZY');
-		console.log('🎰 Max Jackpot Cap:', maxJackpotThreshold.toLocaleString(), '$LAZY');
-		console.log('📈 Per-Roll Increment:', lossIncrement.toLocaleString(), '$LAZY');
+		console.log('Current Jackpot:', jackpotPool.toLocaleString(), '$LAZY');
+		console.log('Max Jackpot Cap:', maxJackpotThreshold.toLocaleString(), '$LAZY');
+		console.log('Per-Roll Increment:', lossIncrement.toLocaleString(), '$LAZY');
 
-		console.log('\n🏆 Jackpot History:');
+		console.log('\nJackpot History:');
 		console.log('   Wins:', jackpotsWon);
 		console.log('   Total Paid:', jackpotPaid.toLocaleString(), '$LAZY');
 
-		console.log('\n🎯 Regular Wins:');
+		console.log('\nRegular Wins:');
 		console.log('   Total Rolls:', totalRolls.toLocaleString());
 		console.log('   Total Wins:', totalWins.toLocaleString());
 		console.log('   Win Rate:', totalRolls > 0 ? ((totalWins / totalRolls) * 100).toFixed(2) + '%' : 'N/A');
 		console.log('   Total Paid:', totalPaid.toLocaleString(), '$LAZY');
 
-		console.log('\n💵 Combined Payouts:', (totalPaid + jackpotPaid).toLocaleString(), '$LAZY');
+		console.log('\nCombined Payouts:', (totalPaid + jackpotPaid).toLocaleString(), '$LAZY');
 
 		console.log('\n═══════════════════════════════════════════════════════════\n');
 	}

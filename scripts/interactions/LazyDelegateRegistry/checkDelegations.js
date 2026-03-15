@@ -1,34 +1,21 @@
+require('dotenv').config();
 const {
-	Client,
 	AccountId,
-	PrivateKey,
 	ContractId,
 	TokenId,
 } = require('@hashgraph/sdk');
-require('dotenv').config();
-const fs = require('fs');
-const { ethers } = require('ethers');
 const readlineSync = require('readline-sync');
-const { readOnlyEVMFromMirrorNode } = require('../../../utils/solidityHelpers');
+const { getEnvConfig } = require('../../../utils/clientFactory');
+const { loadInterface } = require('../../../utils/abiLoader');
+const { queryContract } = require('../../../utils/queryHelpers');
 const { getArgFlag } = require('../../../utils/nodeHelpers');
 const { getBaseURL } = require('../../../utils/hederaMirrorHelpers');
 const axios = require('axios');
 
-// Get operator from .env file
-let operatorKey;
-let operatorId;
-try {
-	operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-	operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-}
-catch {
-	console.log('ERROR: Must specify PRIVATE_KEY & ACCOUNT_ID in the .env file');
-}
-
 const contractName = 'LazyDelegateRegistry';
 const delegateRegistryId = process.env.LAZY_DELEGATE_REGISTRY_CONTRACT_ID;
-const env = process.env.ENVIRONMENT ?? null;
-let client;
+
+const { operatorId, env } = getEnvConfig();
 
 /**
  * Helper to get token name from mirror node
@@ -52,49 +39,11 @@ async function getTokenName(tokenId) {
  * Main function
  */
 const main = async () => {
-	// Check for required environment variables
-	if (
-		operatorKey === undefined ||
-		operatorKey == null ||
-		operatorId === undefined ||
-		operatorId == null
-	) {
-		console.log(
-			'Environment required, please specify PRIVATE_KEY & ACCOUNT_ID in the .env file',
-		);
-		process.exit(1);
-	}
-
 	// Make sure we have a delegate registry contract ID
 	if (!delegateRegistryId) {
 		console.log('ERROR: LAZY_DELEGATE_REGISTRY_CONTRACT_ID not specified in .env file');
 		process.exit(1);
 	}
-
-	// Set up the client based on environment
-	if (env.toUpperCase() == 'TEST') {
-		client = Client.forTestnet();
-		console.log('Using *TESTNET*');
-	}
-	else if (env.toUpperCase() == 'MAIN') {
-		client = Client.forMainnet();
-		console.log('Using *MAINNET*');
-	}
-	else if (env.toUpperCase() == 'PREVIEW') {
-		client = Client.forPreviewnet();
-		console.log('Using *PREVIEWNET*');
-	}
-	else if (env.toUpperCase() == 'LOCAL') {
-		const node = { '127.0.0.1:50211': new AccountId(3) };
-		client = Client.forNetwork(node).setMirrorNetwork('127.0.0.1:5600');
-		console.log('Using *LOCAL*');
-	}
-	else {
-		console.log('ERROR: Must specify either MAIN, TEST, PREVIEW, or LOCAL as ENVIRONMENT in .env file');
-		return;
-	}
-
-	client.setOperator(operatorId, operatorKey);
 
 	// Get command line arguments
 	const args = process.argv.slice(2);
@@ -120,31 +69,18 @@ const main = async () => {
 	const contractId = ContractId.fromString(delegateRegistryId);
 	console.log(`\n-Using Delegate Registry contract: ${contractId.toString()}`);
 
-	const ldrJSON = JSON.parse(
-		fs.readFileSync(
-			`./artifacts/contracts/${contractName}.sol/${contractName}.json`,
-		),
-	);
-
-	const ldrIface = new ethers.Interface(ldrJSON.abi);
+	const ldrIface = loadInterface(contractName);
 
 	// 1. Check if any wallets have been delegated to this address
 	console.log(`\n--- Checking for wallet delegations to ${targetAddress.toString()} ---`);
-	const walletsDelegatedCommand = ldrIface.encodeFunctionData('getWalletsDelegatedTo', [
-		targetAddress.toSolidityAddress(),
-	]);
 
-	const walletsDelegatedResult = await readOnlyEVMFromMirrorNode(
+	const walletsDelegated = await queryContract(
 		env,
 		contractId,
-		walletsDelegatedCommand,
-		operatorId,
-		false,
-	);
-
-	const walletsDelegated = ldrIface.decodeFunctionResult(
+		ldrIface,
 		'getWalletsDelegatedTo',
-		walletsDelegatedResult,
+		[targetAddress.toSolidityAddress()],
+		operatorId,
 	);
 
 	if (walletsDelegated[0].length === 0) {
@@ -160,21 +96,14 @@ const main = async () => {
 
 	// 2. Check for NFT delegations to this address
 	console.log(`\n--- Checking for NFT delegations to ${targetAddress.toString()} ---`);
-	const nftsDelegatedCommand = ldrIface.encodeFunctionData('getNFTsDelegatedTo', [
-		targetAddress.toSolidityAddress(),
-	]);
 
-	const nftsDelegatedResult = await readOnlyEVMFromMirrorNode(
+	const nftsDelegated = await queryContract(
 		env,
 		contractId,
-		nftsDelegatedCommand,
-		operatorId,
-		false,
-	);
-
-	const nftsDelegated = ldrIface.decodeFunctionResult(
+		ldrIface,
 		'getNFTsDelegatedTo',
-		nftsDelegatedResult,
+		[targetAddress.toSolidityAddress()],
+		operatorId,
 	);
 
 	const tokens = nftsDelegated[0];
@@ -187,7 +116,7 @@ const main = async () => {
 		console.log('NFTs delegated to this address:');
 		for (let i = 0; i < tokens.length; i++) {
 			const tokenId = AccountId.fromEvmAddress(0, 0, tokens[i]);
-			const tokenName = await getTokenName(env, tokenId);
+			const tokenName = await getTokenName(tokenId);
 
 			console.log(`\nToken: ${tokenId.toString()} (${tokenName})`);
 			console.log('Serials:');
@@ -210,23 +139,15 @@ const main = async () => {
 					const checkValidity = readlineSync.keyInYNStrict('Do you want to check if these delegations are still valid?');
 					if (checkValidity) {
 						console.log('\nChecking delegation validity...');
-						const validityCommand = ldrIface.encodeFunctionData('checkNFTDelegationIsValidBatch', [
-							[tokens[i]],
-							[serials[i]],
-						]);
 
 						try {
-							const validityResult = await readOnlyEVMFromMirrorNode(
+							const validityData = await queryContract(
 								env,
 								contractId,
-								validityCommand,
-								operatorId,
-								false,
-							);
-
-							const validityData = ldrIface.decodeFunctionResult(
+								ldrIface,
 								'checkNFTDelegationIsValidBatch',
-								validityResult,
+								[[tokens[i]], [serials[i]]],
+								operatorId,
 							);
 
 							const validities = validityData[0][0];
@@ -265,29 +186,20 @@ const main = async () => {
 			const tokenId = TokenId.fromString(tokenIdStr);
 			console.log(`\nChecking delegations for token ${tokenId.toString()}...`);
 
-			const serialsCommand = ldrIface.encodeFunctionData('getSerialsDelegatedTo', [
-				targetAddress.toSolidityAddress(),
-				tokenId.toSolidityAddress(),
-			]);
-
-			const serialsResult = await readOnlyEVMFromMirrorNode(
+			const serialsDelegated = await queryContract(
 				env,
 				contractId,
-				serialsCommand,
-				operatorId,
-				false,
-			);
-
-			const serialsDelegated = ldrIface.decodeFunctionResult(
+				ldrIface,
 				'getSerialsDelegatedTo',
-				serialsResult,
+				[targetAddress.toSolidityAddress(), tokenId.toSolidityAddress()],
+				operatorId,
 			);
 
 			if (serialsDelegated[0].length === 0) {
 				console.log('No serials of this token are delegated to this address.');
 			}
 			else {
-				const tokenName = await getTokenName(env, tokenId);
+				const tokenName = await getTokenName(tokenId);
 				console.log(`\nToken: ${tokenId.toString()} (${tokenName})`);
 				console.log('Delegated serials:');
 

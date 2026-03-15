@@ -6,43 +6,22 @@
  * Usage: node scripts/interactions/LazyLotto/user/claimPrize.js [prizeIndex]
  */
 
+require('dotenv').config();
 const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
 	TokenId,
-	Hbar,
 	HbarUnit,
 } = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const { setHbarAllowance, associateTokensToAccount } = require('../../../../utils/hederaHelpers');
-const { sleep } = require('@directus/sdk');
-require('dotenv').config();
+const { sleep } = require('../../../../utils/nodeHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-const storageContractId = ContractId.fromString(process.env.LAZY_LOTTO_STORAGE);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
+const storageContractId = getContractId('LAZY_LOTTO_STORAGE');
 
 // Helper: Convert Hedera ID to EVM address
 async function convertToHederaId(evmAddress) {
@@ -64,24 +43,8 @@ async function claimPrize() {
 		// Get prize index
 		let prizeIndexStr = process.argv[2];
 
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║              LazyLotto Claim Prize                        ║');
@@ -90,13 +53,10 @@ async function claimPrize() {
 		console.log(`📄 Contract: ${contractId.toString()}\n`);
 
 		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
+		const lazyLottoIface = loadInterface('LazyLotto');
 
 		// Import helpers
-		const { readOnlyEVMFromMirrorNode, contractExecuteFunction } = require('../../../../utils/solidityHelpers');
+		const { contractExecuteFunction } = require('../../../../utils/solidityHelpers');
 		const { estimateGas } = require('../../../../utils/gasHelpers');
 
 		console.log('🔍 Fetching your pending prizes...\n');
@@ -104,14 +64,11 @@ async function claimPrize() {
 		// Get pending prizes
 		const userEvmAddress = '0x' + operatorId.toSolidityAddress();
 		// Get pending prizes count first
-		let countQuery = lazyLottoIface.encodeFunctionData('getPendingPrizesCount', [userEvmAddress]);
-		let countResult = await readOnlyEVMFromMirrorNode(env, contractId, countQuery, operatorId, false);
-		const prizeCount = lazyLottoIface.decodeFunctionResult('getPendingPrizesCount', countResult)[0];
+		const countResult = await queryContract(env, contractId, lazyLottoIface, 'getPendingPrizesCount', [userEvmAddress], operatorId);
+		const prizeCount = countResult[0];
 
 		// Get all pending prizes
-		let encodedCommand = lazyLottoIface.encodeFunctionData('getPendingPrizesPage', [userEvmAddress, 0, Number(prizeCount)]);
-		let result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const pendingPrizes = lazyLottoIface.decodeFunctionResult('getPendingPrizesPage', result);
+		const pendingPrizes = await queryContract(env, contractId, lazyLottoIface, 'getPendingPrizesPage', [userEvmAddress, 0, Number(prizeCount)], operatorId);
 
 		if (pendingPrizes[0].length === 0) {
 			console.log('❌ You have no pending prizes to claim\n');
@@ -244,7 +201,8 @@ async function claimPrize() {
 					client,
 					operatorId,
 					storageContractId,
-					new Hbar(requiredHbar, HbarUnit.Hbar),
+					requiredHbar,
+					HbarUnit.Hbar,
 				);
 
 				if (allowanceTx.status.toString() !== 'SUCCESS') {
@@ -262,8 +220,8 @@ async function claimPrize() {
 		const gasEstimate = gasInfo.gasLimit;
 
 		// Confirm claim
-		const confirm = await prompt('Proceed with claim? (yes/no): ');
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt('Proceed with claim? (yes/no): ');
+		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Claim cancelled');
 			process.exit(0);
 		}
@@ -293,13 +251,10 @@ async function claimPrize() {
 		console.log('🔍 Waiting on sync to fetch updated pending prizes...\n');
 		await sleep(5000);
 		// Get updated pending prizes
-		countQuery = lazyLottoIface.encodeFunctionData('getPendingPrizesCount', [userEvmAddress]);
-		countResult = await readOnlyEVMFromMirrorNode(env, contractId, countQuery, operatorId, false);
-		const newPrizeCount = lazyLottoIface.decodeFunctionResult('getPendingPrizesCount', countResult)[0];
+		const newCountResult = await queryContract(env, contractId, lazyLottoIface, 'getPendingPrizesCount', [userEvmAddress], operatorId);
+		const newPrizeCount = newCountResult[0];
 
-		encodedCommand = lazyLottoIface.encodeFunctionData('getPendingPrizesPage', [userEvmAddress, 0, Number(newPrizeCount)]);
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const newPendingPrizes = lazyLottoIface.decodeFunctionResult('getPendingPrizesPage', result);
+		const newPendingPrizes = await queryContract(env, contractId, lazyLottoIface, 'getPendingPrizesPage', [userEvmAddress, 0, Number(newPrizeCount)], operatorId);
 
 		console.log('═══════════════════════════════════════════════════════════');
 		console.log('  UPDATED STATE');

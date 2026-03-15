@@ -1,6 +1,4 @@
 const {
-	Client,
-	AccountId,
 	PrivateKey,
 	ContractId,
 	TokenId,
@@ -10,18 +8,8 @@ const fs = require('fs');
 const { ethers } = require('ethers');
 const readlineSync = require('readline-sync');
 const { contractDeployFunction, contractExecuteFunction } = require('../../utils/solidityHelpers');
-require('dotenv').config();
-
-// Get operator from .env file
-let operatorKey;
-let operatorId;
-try {
-	operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-	operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-}
-catch (err) {
-	console.log('ERROR: Must specify PRIVATE_KEY & ACCOUNT_ID in the .env file');
-}
+const { getEnvConfig, createClient } = require('../../utils/clientFactory');
+const { loadInterface } = require('../../utils/abiLoader');
 
 // Contract names and configuration
 const lazyContractCreator = 'LAZYTokenCreator';
@@ -29,7 +17,6 @@ const lazyGasStationName = 'LazyGasStation';
 const contractName = 'LazyTradeLotto';
 const lazyDelegateRegistryName = 'LazyDelegateRegistry';
 const prngName = 'PrngSystemContract';
-const env = process.env.ENVIRONMENT ?? null;
 const LAZY_BURN_PERCENT = process.env.LAZY_BURN_PERCENT ?? 25;
 const LAZY_DECIMAL = Number(process.env.LAZY_DECIMALS ?? 1);
 const LAZY_MAX_SUPPLY = process.env.LAZY_MAX_SUPPLY ?? 250_000_000;
@@ -44,47 +31,10 @@ let lazyIface, lazyGasStationIface;
 let initialLottoJackpot, lottoLossIncrement;
 
 const main = async () => {
-	// Configure the client object
-	if (
-		operatorKey === undefined ||
-		operatorKey == null ||
-		operatorId === undefined ||
-		operatorId == null
-	) {
-		console.log(
-			'Environment required, please specify PRIVATE_KEY & ACCOUNT_ID in the .env file',
-		);
-		process.exit(1);
-	}
+	const { operatorId, operatorKey, env } = getEnvConfig();
+	client = createClient(env, operatorId, operatorKey);
 
 	console.log('\n-Using ENVIRONMENT:', env);
-
-	// Set up the appropriate network client
-	if (env?.toUpperCase() == 'TEST') {
-		client = Client.forTestnet();
-		console.log('Deploying to *TESTNET*');
-	}
-	else if (env?.toUpperCase() == 'MAIN') {
-		client = Client.forMainnet();
-		console.log('Deploying to *MAINNET*');
-	}
-	else if (env?.toUpperCase() == 'PREVIEW') {
-		client = Client.forPreviewnet();
-		console.log('Deploying to *PREVIEWNET*');
-	}
-	else if (env?.toUpperCase() == 'LOCAL') {
-		const node = { '127.0.0.1:50211': new AccountId(3) };
-		client = Client.forNetwork(node).setMirrorNetwork('127.0.0.1:5600');
-		console.log('Deploying to *LOCAL*');
-	}
-	else {
-		console.log(
-			'ERROR: Must specify either MAIN, TEST, PREVIEW or LOCAL as environment in .env file',
-		);
-		return;
-	}
-
-	client.setOperator(operatorId, operatorKey);
 	console.log('\n-Using Operator:', operatorId.toString());
 
 	// Step 1: Set up LAZY token creator and token
@@ -144,13 +94,13 @@ const main = async () => {
 	}
 
 	// Step 2: Set up Lazy Gas Station
+	lazyGasStationIface = loadInterface(lazyGasStationName);
+
 	const lazyGasStationJSON = JSON.parse(
 		fs.readFileSync(
 			`./artifacts/contracts/${lazyGasStationName}.sol/${lazyGasStationName}.json`,
 		),
 	);
-
-	lazyGasStationIface = new ethers.Interface(lazyGasStationJSON.abi);
 
 	if (process.env.LAZY_GAS_STATION_CONTRACT_ID) {
 		console.log(
@@ -266,22 +216,22 @@ const main = async () => {
 	}
 
 	// Step 5: Set up signing wallet for message signatures
-	if (process.env.SIGNING_WALLET) {
+	if (process.env.SIGNING_KEY) {
 		try {
-			console.log('\n-Using existing SIGNING_WALLET from file');
-			signingWallet = PrivateKey.fromStringECDSA(process.env.SIGNING_WALLET);
+			console.log('\n-Using existing SIGNING_KEY from file');
+			signingWallet = PrivateKey.fromStringECDSA(process.env.SIGNING_KEY);
 		}
-		catch (error) {
-			console.log('ERROR: Invalid SIGNING_WALLET format. Must be an ECDSA private key.');
+		catch {
+			console.log('ERROR: Invalid SIGNING_KEY format. Must be an ECDSA private key.');
 			console.log('Creating a new signing wallet instead.');
 
 			signingWallet = PrivateKey.generateECDSA();
 			console.log('\nREMEMBER THIS KEY HAS VALUE - PROTECT IT');
-			console.log('Consider adding it to your .env file as SIGNING_WALLET=', signingWallet.toString());
+			console.log('Consider adding it to your .env file as SIGNING_KEY=', signingWallet.toString());
 		}
 	}
 	else {
-		let proceed = readlineSync.keyInYNStrict('No SIGNING_WALLET found, do you want to create one?');
+		let proceed = readlineSync.keyInYNStrict('No SIGNING_KEY found, do you want to create one?');
 
 		if (!proceed) {
 			console.log('Aborting');

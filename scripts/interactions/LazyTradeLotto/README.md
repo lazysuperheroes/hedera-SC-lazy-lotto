@@ -301,7 +301,7 @@ PRIVATE_KEY=302e...          # Your private key
 
 # Required for proper $LAZY formatting
 LAZY_TOKEN_ID=0.0.xxxxx     # $LAZY token ID
-LAZY_DECIMALS=8              # $LAZY token decimals
+LAZY_DECIMALS=1              # $LAZY token decimals
 
 # Required for testing scripts ONLY
 SYSTEM_WALLET_KEY=...        # systemWallet private key (TestNet only!)

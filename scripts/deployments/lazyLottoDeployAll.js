@@ -39,24 +39,17 @@
  */
 
 const fs = require('fs');
-const path = require('path');
 const readline = require('readline');
 const {
-	Client,
-	AccountId,
-	PrivateKey,
 	ContractId,
 	TokenId,
 	ContractFunctionParameters,
-	TransferTransaction,
-	Hbar,
 } = require('@hashgraph/sdk');
 const { ethers } = require('ethers');
-require('dotenv').config();
 
-const { contractDeployFunction, contractExecuteFunction, readOnlyEVMFromMirrorNode } = require('../../utils/solidityHelpers');
-const { estimateGas } = require('../../utils/gasHelpers');
-const { parseTransactionRecord } = require('../../utils/transactionHelpers');
+const { contractDeployFunction, contractExecuteFunction } = require('../../utils/solidityHelpers');
+const { getEnvConfig, createClient } = require('../../utils/clientFactory');
+const { queryContract } = require('../../utils/queryHelpers');
 
 // CLI flags
 const args = process.argv.slice(2);
@@ -124,7 +117,7 @@ let state = {
 // Hedera client and interfaces
 let client;
 let operatorId, operatorKey;
-let interfaces = {};
+const interfaces = {};
 
 // Helper functions
 function sleep(ms) {
@@ -141,12 +134,6 @@ function loadState() {
 
 function saveState() {
 	fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-}
-
-function clearState() {
-	if (fs.existsSync(STATE_FILE)) {
-		fs.unlinkSync(STATE_FILE);
-	}
 }
 
 function prompt(question) {
@@ -220,44 +207,22 @@ async function initializeClient() {
 	console.log('  LazyLotto Complete Deployment Orchestrator');
 	console.log('='.repeat(60) + '\n');
 
-	try {
-		operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-		operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-	}
-	catch (error) {
-		console.error('ERROR: ACCOUNT_ID and PRIVATE_KEY must be set in .env');
-		process.exit(1);
-	}
+	const config = getEnvConfig();
+	operatorId = config.operatorId;
+	operatorKey = config.operatorKey;
 
 	const envUpper = env.toUpperCase();
 	console.log(`Environment: ${envUpper}`);
 
-	if (envUpper === 'TEST' || envUpper === 'TESTNET') {
-		client = Client.forTestnet();
-	}
-	else if (envUpper === 'MAIN' || envUpper === 'MAINNET') {
-		client = Client.forMainnet();
-		if (!nonInteractive) {
-			const confirm = await prompt('WARNING: Deploying to MAINNET. Type "MAINNET" to confirm: ');
-			if (confirm !== 'MAINNET') {
-				console.log('Deployment cancelled.');
-				process.exit(0);
-			}
+	if ((envUpper === 'MAIN' || envUpper === 'MAINNET') && !nonInteractive) {
+		const confirmInput = await prompt('WARNING: Deploying to MAINNET. Type "MAINNET" to confirm: ');
+		if (confirmInput !== 'MAINNET') {
+			console.log('Deployment cancelled.');
+			process.exit(0);
 		}
 	}
-	else if (envUpper === 'PREVIEW' || envUpper === 'PREVIEWNET') {
-		client = Client.forPreviewnet();
-	}
-	else if (envUpper === 'LOCAL') {
-		const node = { '127.0.0.1:50211': new AccountId(3) };
-		client = Client.forNetwork(node).setMirrorNetwork('127.0.0.1:5600');
-	}
-	else {
-		console.error(`Unknown environment: ${env}`);
-		process.exit(1);
-	}
 
-	client.setOperator(operatorId, operatorKey);
+	client = createClient(env, operatorId, operatorKey);
 	console.log(`Operator: ${operatorId.toString()}\n`);
 
 	state.environment = envUpper;
@@ -341,14 +306,13 @@ async function stepLazyToken() {
 					client,
 					interfaces.lazyTokenCreator.bytecode,
 					3_500_000,
-					new ContractFunctionParameters().addUint256(0),
 				);
 				state.contracts.lazySCT = sctId;
 				console.log(`LAZY SCT deployed: ${sctId.toString()}`);
 			}
 
 			// Get token parameters
-			const decimals = parseInt(process.env.LAZY_DECIMALS ?? '8');
+			const decimals = parseInt(process.env.LAZY_DECIMALS ?? '1');
 			const maxSupply = parseInt(process.env.LAZY_MAX_SUPPLY ?? '1000000000');
 
 			console.log('Creating LAZY fungible token...');
@@ -691,7 +655,7 @@ async function stepTradeLotto() {
 				: `0x${process.env.SIGNING_KEY}`;
 			const signingWallet = new ethers.Wallet(signingKey);
 
-			const decimals = parseInt(process.env.LAZY_DECIMALS ?? '8');
+			const decimals = parseInt(process.env.LAZY_DECIMALS ?? '1');
 			const initialJackpot = parseInt(process.env.INITIAL_LOTTO_JACKPOT ?? '2000') * (10 ** decimals);
 			const lossIncrement = parseInt(process.env.LOTTO_LOSS_INCREMENT ?? '50') * (10 ** decimals);
 			const burnPercent = parseInt(process.env.LAZY_BURN_PERCENT ?? '25');
@@ -766,27 +730,19 @@ async function stepVerify() {
 
 	// Verify LazyLotto configuration
 	try {
-		let encoded = interfaces.lazyLotto.abi.encodeFunctionData('lazyToken');
-		let result = await readOnlyEVMFromMirrorNode(env, state.contracts.lazyLotto, encoded, operatorId, false);
-		let decoded = interfaces.lazyLotto.abi.decodeFunctionResult('lazyToken', result);
+		let decoded = await queryContract(env, state.contracts.lazyLotto, interfaces.lazyLotto.abi, 'lazyToken', [], operatorId);
 		const tokenMatch = decoded[0].slice(2).toLowerCase() === state.contracts.lazyToken.toSolidityAddress();
 		checks.push({ name: 'LazyLotto → lazyToken', pass: tokenMatch });
 
-		encoded = interfaces.lazyLotto.abi.encodeFunctionData('storageContract');
-		result = await readOnlyEVMFromMirrorNode(env, state.contracts.lazyLotto, encoded, operatorId, false);
-		decoded = interfaces.lazyLotto.abi.decodeFunctionResult('storageContract', result);
+		decoded = await queryContract(env, state.contracts.lazyLotto, interfaces.lazyLotto.abi, 'storageContract', [], operatorId);
 		const storageMatch = decoded[0].slice(2).toLowerCase() === state.contracts.lazyLottoStorage.toSolidityAddress();
 		checks.push({ name: 'LazyLotto → storageContract', pass: storageMatch });
 
-		encoded = interfaces.lazyLotto.abi.encodeFunctionData('poolManager');
-		result = await readOnlyEVMFromMirrorNode(env, state.contracts.lazyLotto, encoded, operatorId, false);
-		decoded = interfaces.lazyLotto.abi.decodeFunctionResult('poolManager', result);
+		decoded = await queryContract(env, state.contracts.lazyLotto, interfaces.lazyLotto.abi, 'poolManager', [], operatorId);
 		const pmMatch = decoded[0].slice(2).toLowerCase() === state.contracts.poolManager.toSolidityAddress();
 		checks.push({ name: 'LazyLotto → poolManager', pass: pmMatch });
 
-		encoded = interfaces.poolManager.abi.encodeFunctionData('lazyLotto');
-		result = await readOnlyEVMFromMirrorNode(env, state.contracts.poolManager, encoded, operatorId, false);
-		decoded = interfaces.poolManager.abi.decodeFunctionResult('lazyLotto', result);
+		decoded = await queryContract(env, state.contracts.poolManager, interfaces.poolManager.abi, 'lazyLotto', [], operatorId);
 		const llMatch = decoded[0].slice(2).toLowerCase() === state.contracts.lazyLotto.toSolidityAddress();
 		checks.push({ name: 'PoolManager → lazyLotto', pass: llMatch });
 	}
@@ -864,11 +820,16 @@ async function displaySummary() {
 	}
 	console.log('─'.repeat(50));
 
-	console.log('\nNext Steps:');
+	console.log('\n\u26a0\ufe0f  WARNING: Community pool creation fees default to ZERO after deployment.');
+	console.log('   Run setCreationFees.js immediately to set HBAR and LAZY fees.');
+	console.log('   Until fees are set, anyone can create community pools for free.\n');
+
+	console.log('Next Steps:');
 	console.log('  1. Update .env with the contract IDs above');
-	console.log('  2. Run: node scripts/interactions/healthCheck.js');
-	console.log('  3. Create lottery pools and add prizes');
-	console.log('  4. Fund LazyGasStation with HBAR and LAZY');
+	console.log('  2. Run: node scripts/interactions/LazyLotto/admin/setCreationFees.js (CRITICAL - set fees first!)');
+	console.log('  3. Run: node scripts/interactions/healthCheck.js');
+	console.log('  4. Create lottery pools and add prizes');
+	console.log('  5. Fund LazyGasStation with HBAR and LAZY');
 	console.log('');
 
 	// Keep state file for reference

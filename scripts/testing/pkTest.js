@@ -1,20 +1,11 @@
-const { PrivateKey, TokenId, AccountId, Client, ContractId } = require('@hashgraph/sdk');
+const { PrivateKey, TokenId, ContractId } = require('@hashgraph/sdk');
 const ethers = require('ethers');
 const { Stake, generateStakingRewardProof } = require('../../utils/LazyNFTStakingHelper');
 const { contractExecuteQuery } = require('../../utils/solidityHelpers');
-const fs = require('fs');
-require('dotenv').config();
+const { getEnvConfig, createClient } = require('../../utils/clientFactory');
+const { loadInterface } = require('../../utils/abiLoader');
 
-// Get operator from .env file
-let operatorKey;
-let operatorId;
-try {
-	operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-	operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-}
-catch (err) {
-	console.log('ERROR: Must specify PRIVATE_KEY & ACCOUNT_ID in the .env file');
-}
+const { operatorId, operatorKey } = getEnvConfig();
 
 const signingWallet = PrivateKey.generateECDSA();
 console.log('Type:', signingWallet.type);
@@ -56,18 +47,10 @@ async function main() {
 
 	const lnsContractId = ContractId.fromString('0.0.343284');
 
-	// now deploy main contract
-	const lazyNFTStakerJson = JSON.parse(
-		fs.readFileSync(
-			`./artifacts/contracts/${contractName}.sol/${contractName}.json`,
-		),
-	);
-
 	// import ABI
-	const lazyNFTStakingIface = ethers.Interface.from(lazyNFTStakerJson.abi);
+	const lazyNFTStakingIface = loadInterface(contractName);
 
-	const client = Client.forPreviewnet();
-	client.setOperator(operatorId, operatorKey);
+	const client = createClient('preview', operatorId, operatorKey);
 
 	const result = await contractExecuteQuery(
 		lnsContractId,

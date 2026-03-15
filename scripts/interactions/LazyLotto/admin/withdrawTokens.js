@@ -19,18 +19,17 @@
  *   --signers=Alice,Bob,Charlie     Label signers for clarity
  */
 
+require('dotenv').config();
 const {
-	Client,
 	AccountId,
-	PrivateKey,
-	ContractId,
 	TokenId,
+	Hbar,
 } = require('@hashgraph/sdk');
 const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
-require('dotenv').config();
-
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { homebrewPopulateAccountNum, checkMirrorHbarBalance, checkMirrorBalance } = require('../../../../utils/hederaMirrorHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
@@ -38,26 +37,9 @@ const {
 } = require('../../../../utils/scriptHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-const storageContractId = ContractId.fromString(process.env.LAZY_LOTTO_STORAGE_CONTRACT_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
+const storageContractId = getContractId('LAZY_LOTTO_STORAGE');
 
 // Helper: Convert EVM address to Hedera ID
 async function convertToHederaId(evmAddress) {
@@ -65,7 +47,6 @@ async function convertToHederaId(evmAddress) {
 		return 'HBAR';
 	}
 
-	const { homebrewPopulateAccountNum } = require('../../../../utils/hederaMirrorHelpers');
 	const hederaId = await homebrewPopulateAccountNum(env, evmAddress);
 	return hederaId ? hederaId.toString() : evmAddress;
 }
@@ -79,24 +60,8 @@ async function withdrawTokens() {
 	let client;
 
 	try {
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║          LazyLotto Withdraw Tokens (Admin)                ║');
@@ -109,13 +74,7 @@ async function withdrawTokens() {
 		displayMultiSigBanner();
 
 		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
-
-		// Import helpers
-		const { homebrewGetBalance, queryTokenBalance } = require('../../../../utils/hederaMirrorHelpers');
+		const lazyLottoIface = loadInterface('LazyLotto');
 
 		// Menu
 		console.log('Select token type to withdraw:');
@@ -130,23 +89,25 @@ async function withdrawTokens() {
 			// HBAR withdrawal
 			console.log('\n💰 Withdraw HBAR\n');
 
-			// Get storage contract HBAR balance
-			const storageBalance = await homebrewGetBalance(env, storageContractId.toString());
-			console.log(`Storage contract balance: ${ethers.formatEther(storageBalance)} ℏ\n`);
+			// Get storage contract HBAR balance (returns tinybars)
+			const storageBalanceTinybars = await checkMirrorHbarBalance(env, storageContractId.toString());
+			const storageBalanceHbar = Hbar.fromTinybars(storageBalanceTinybars);
+			console.log(`Storage contract balance: ${storageBalanceHbar.toString()} \n`);
 
 			const amountStr = await prompt('Enter amount to withdraw (HBAR): ');
 
 			let amount;
 			try {
-				amount = ethers.parseEther(amountStr);
+				// Convert HBAR to tinybars (8 decimals)
+				amount = ethers.parseUnits(amountStr, 8);
 			}
 			catch {
 				console.error('❌ Invalid amount format');
 				process.exit(1);
 			}
 
-			if (amount > storageBalance) {
-				console.error(`❌ Insufficient balance in storage. Available: ${ethers.formatEther(storageBalance)} ℏ`);
+			if (amount > BigInt(storageBalanceTinybars)) {
+				console.error(`❌ Insufficient balance in storage. Available: ${storageBalanceHbar.toString()}`);
 				process.exit(1);
 			}
 
@@ -173,7 +134,7 @@ async function withdrawTokens() {
 			tokenType = 'HBAR';
 
 			console.log('\nWithdrawal:');
-			console.log(`  Amount: ${ethers.formatEther(amount)} ℏ`);
+			console.log(`  Amount: ${Hbar.fromTinybars(amount.toString()).toString()}`);
 			console.log(`  To: ${recipientInput}\n`);
 		}
 		else if (choice === '2') {
@@ -201,7 +162,7 @@ async function withdrawTokens() {
 			}
 
 			// Get token info from storage contract
-			const storageBalance = await queryTokenBalance(env, storageContractId.toString(), tokenId.toString());
+			const storageBalance = await checkMirrorBalance(env, storageContractId.toString(), tokenId.toString());
 			console.log(`Storage contract balance: ${storageBalance.toString()} units`);
 
 			// Note: The contract's transferFungible function has built-in safety checks
@@ -258,8 +219,8 @@ async function withdrawTokens() {
 
 		// Confirm
 		console.log('⚠️  Ensure this will not affect prize fulfillment!');
-		const confirm = await prompt('Proceed with withdrawal? (yes/no): ');
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt('Proceed with withdrawal? (yes/no): ');
+		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Operation cancelled');
 			process.exit(0);
 		}

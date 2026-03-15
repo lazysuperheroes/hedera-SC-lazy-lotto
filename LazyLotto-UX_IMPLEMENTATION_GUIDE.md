@@ -1,8 +1,8 @@
 # LazyLotto - UX Implementation Guide for Frontend Developers
 
-**Version:** 2.1  
-**Last Updated:** December 2, 2025  
-**Contract Versions:** LazyLotto 23.782 KB | LazyLottoStorage 11.137 KB
+**Version:** 2.2
+**Last Updated:** March 2026
+**Contract Versions:** LazyLotto 23.782 KB | LazyLottoPoolManager 9.396 KB | LazyLottoStorage 11.137 KB
 **Target Audience:** Frontend Developers, UX Designers, Integration Engineers
 
 ---
@@ -40,16 +40,19 @@ This guide provides comprehensive instructions for building user-facing applicat
 
 ### Architecture Note
 
-LazyLotto uses a **split-contract architecture** for size optimization:
+LazyLotto uses a **three-contract architecture** for size optimization and separation of concerns:
 
-- **LazyLotto** (23.612 KB): Your primary interface - handles all business logic, user interactions, and admin operations
+- **LazyLotto** (23.782 KB): Your primary interface - handles all business logic, user interactions, and admin operations
+- **LazyLottoPoolManager** (9.396 KB): Manages pool ownership, community pool creation, proceeds, and bonus calculations
 - **LazyLottoStorage** (11.137 KB): Internal contract that holds tokens and executes HTS operations
 
 **Important for Frontend Developers**:
-1. **Only interact with LazyLotto** - all user and admin functions are exposed here
-2. **Token approvals must go to the storage contract** - get the address via `contract.storageContract()`
-3. **Never call LazyLottoStorage directly** - it's access-controlled and only accepts calls from LazyLotto
-4. **Use mirror node for balance verification** - provides independent confirmation of token balances
+1. **Interact with LazyLotto for gameplay** - ticket purchases, rolling, prize claims
+2. **Interact with PoolManager for pool management** - ownership queries, proceeds, community pool configuration
+3. **Non-LAZY token/NFT approvals go to the storage contract** - get the address via `contract.storageContract()`
+4. **$LAZY approvals ALWAYS go to LazyGasStation** - for entry fees, creation fees, and all LAZY operations. GasStation handles burn logic internally.
+5. **Never call LazyLottoStorage directly** - it's access-controlled and only accepts calls from LazyLotto
+6. **Use mirror node for balance verification** - provides independent confirmation of token balances
 
 ```javascript
 // STEP 1: Get storage address for token approvals
@@ -57,32 +60,51 @@ const storageAddress = await lazyLottoContract.storageContract();
 console.log('Storage contract:', storageAddress);
 // Example output: "0x0000000000000000000000000000000000123456"
 
-// STEP 2: Approve tokens to storage (required before buying tickets with tokens)
-// For fungible tokens (like custom prize tokens):
+// STEP 2: Approve non-LAZY tokens to storage (for ticket fees, prize deposits)
+// For fungible tokens (custom fee tokens, prize tokens — NOT $LAZY):
 await tokenContract.approve(storageAddress, amount);
 
-// For NFT operations (like redeeming ticket NFTs):
+// For NFT operations (like redeeming ticket NFTs, depositing prize NFTs):
 await nftContract.setApprovalForAll(storageAddress, true);
 
-// STEP 3: Call LazyLotto methods (not storage)
+// STEP 2b: Approve $LAZY to LazyGasStation (for LAZY entry fees, creation fees)
+// $LAZY is ALWAYS routed through LazyGasStation (handles burn logic)
+const gasStationAddress = await lazyLottoContract.lazyGasStation();
+await lazyToken.approve(gasStationAddress, lazyAmount);
+
+// STEP 3: Call LazyLotto methods for gameplay (not storage)
 // The LazyLotto contract will internally delegate to storage for token operations
 await lazyLottoContract.buyEntry(poolId, ticketCount);
+
+// STEP 4: Call PoolManager methods for pool management queries
+const poolManagerAddress = await lazyLottoContract.poolManager();
+const poolManagerContract = new ethers.Contract(poolManagerAddress, POOL_MANAGER_ABI, provider);
+const owner = await poolManagerContract.getPoolOwner(poolId);
+const isGlobal = await poolManagerContract.isGlobalPool(poolId);
 ```
 
 **Why This Architecture?**
 - **Size Limit**: Hedera has a 24 KB contract size limit
-- **Separation of Concerns**: Business logic (LazyLotto) separate from token operations (Storage)
-- **User Experience**: Users only need to know about LazyLotto - storage is invisible
+- **Separation of Concerns**: Business logic (LazyLotto), pool management (PoolManager), token operations (Storage)
+- **User Experience**: Users interact with LazyLotto for gameplay, PoolManager for pool ownership
 - **Safety**: Storage contract is permanently locked to LazyLotto (set once via `setContractUser()`)
 
 **Critical Token Approval Pattern**:
 ```javascript
-// ❌ WRONG - Approving to LazyLotto won't work for token transfers
+// ❌ WRONG - Approving to LazyLotto won't work
 await tokenContract.approve(lazyLottoAddress, amount);
 
-// ✅ CORRECT - Approve to storage contract
+// ❌ WRONG - Approving $LAZY to storage won't work (LAZY goes through GasStation)
+await lazyToken.approve(storageAddress, amount);
+
+// ✅ CORRECT - Non-LAZY tokens/NFTs → Storage Contract
 const storageAddress = await lazyLottoContract.storageContract();
-await tokenContract.approve(storageAddress, amount);
+await prizeToken.approve(storageAddress, amount);
+await nftCollection.setApprovalForAll(storageAddress, true);
+
+// ✅ CORRECT - $LAZY → LazyGasStation (always)
+const gasStationAddress = await lazyLottoContract.lazyGasStation();
+await lazyToken.approve(gasStationAddress, amount);
 ```
 
 ---
@@ -90,13 +112,14 @@ await tokenContract.approve(storageAddress, amount);
 ## Table of Contents
 
 1. [Quick Start](#quick-start)
-2. [Core User Flows](#core-user-flows)
-3. [Data Fetching Patterns](#data-fetching-patterns)
-4. [Display Components](#display-components)
-5. [Transaction Workflows](#transaction-workflows)
-6. [Error Handling](#error-handling)
-7. [Real-Time Updates](#real-time-updates)
-8. [Best Practices](#best-practices)
+2. [Core User Flows](#core-user-flows) (Sections 1-9: Browse, View Prizes, Boosts, Purchase, Holdings, Redeem, Roll, Claim, Convert)
+3. [Community Pool Management](#10-community-pool-management) (Section 10: Discover, Create, Manage, Proceeds, Transfer, Close)
+4. [Data Fetching Patterns](#data-fetching-patterns)
+5. [Display Components](#display-components)
+6. [Transaction Workflows](#transaction-workflows)
+7. [Error Handling](#error-handling)
+8. [Real-Time Updates](#real-time-updates)
+9. [Best Practices](#best-practices)
 
 ---
 
@@ -129,6 +152,32 @@ isPrizeManager(address) → bool
 
 // Storage contract reference (CRITICAL for token approvals)
 storageContract() → address
+
+// PoolManager reference
+poolManager() → address
+```
+
+**PoolManager Read-Only (View) Methods:**
+```solidity
+// Pool ownership and categorization
+getPoolOwner(poolId) → address               // address(0) = global pool
+isGlobalPool(poolId) → bool
+getUserPools(userAddress) → uint256[]         // All pools owned by user
+canManagePool(poolId, userAddress) → bool     // Permission check
+canAddPrizes(poolId, userAddress) → bool      // Permission check
+getPoolPrizeManager(poolId) → address         // address(0) = no delegate
+
+// Pool enumeration (paginated)
+totalGlobalPools() → uint256
+totalCommunityPools() → uint256
+getGlobalPools(offset, limit) → uint256[]
+getCommunityPools(offset, limit) → uint256[]
+
+// Pool proceeds and fees
+getPoolProceeds(poolId, token) → (uint256 total, uint256 withdrawn)
+getPoolPlatformFeePercentage(poolId) → uint256
+platformProceedsPercentage() → uint256        // Current default (e.g. 5)
+getCreationFees() → (uint256 hbar, uint256 lazy)
 ```
 
 **State-Changing Methods:**
@@ -248,6 +297,21 @@ claimPrizeFromNFT(tokenId, serialNumbers)
 
 // Prize trading
 redeemPrizeToNFT(indices) → int64[]
+
+// Community pool management (called on LazyLotto)
+createPool(name, symbol, memo, royalties, ticketCID, winCID, winRate, entryFee, feeToken) payable → uint256
+addPrizePackage(poolId, token, amount, nftTokens, nftSerials) payable
+pausePool(poolId)
+unpausePool(poolId)
+closePool(poolId)
+withdrawPoolProceeds(poolId, token)
+```
+
+**PoolManager State-Changing Methods:**
+```solidity
+// Pool ownership management (called on PoolManager)
+setPoolPrizeManager(poolId, managerAddress)
+transferPoolOwnership(poolId, newOwnerAddress)
 ```
 
 ---
@@ -1450,6 +1514,911 @@ async function convertPrizesToNFTs(prizeIndices) {
 
 ---
 
+### 10. Community Pool Management
+
+Community pools allow **any user** (not just admins) to create, own, and manage their own lottery pools. The `LazyLottoPoolManager` contract tracks ownership, creation fees, proceeds, and authorization. Pool creators earn a share of entry fee proceeds while the platform takes a configurable percentage (locked at pool creation time).
+
+**Key Concepts:**
+- **Global Pools**: Created by admins, no creation fees, no proceeds withdrawal (platform-owned)
+- **Community Pools**: Created by users, subject to creation fees (HBAR + LAZY), owner earns proceeds
+- **Pool Owner**: The address that created the pool (or received ownership via transfer)
+- **Prize Manager**: An optional delegate who can add prizes to a pool on behalf of the owner
+- **Platform Fee**: Percentage of entry proceeds taken by the platform (default 5%, max 25%), locked at creation time
+
+#### 10.1 Discover Community vs Global Pools
+
+**Objective:** Query PoolManager for pool categorization and display pool type badges
+
+**Implementation Steps:**
+
+```javascript
+// Step 1: Get pool counts by category
+const totalGlobal = await poolManagerContract.totalGlobalPools();
+const totalCommunity = await poolManagerContract.totalCommunityPools();
+
+console.log(`Global pools: ${totalGlobal}, Community pools: ${totalCommunity}`);
+
+// Step 2: Fetch paginated pool IDs by category
+const PAGE_SIZE = 20;
+
+async function fetchAllPoolIds(fetchFn, total) {
+  const allIds = [];
+  for (let offset = 0; offset < total; offset += PAGE_SIZE) {
+    const batch = await fetchFn(offset, PAGE_SIZE);
+    allIds.push(...batch);
+  }
+  return allIds;
+}
+
+const globalPoolIds = await fetchAllPoolIds(
+  (offset, limit) => poolManagerContract.getGlobalPools(offset, limit),
+  totalGlobal
+);
+
+const communityPoolIds = await fetchAllPoolIds(
+  (offset, limit) => poolManagerContract.getCommunityPools(offset, limit),
+  totalCommunity
+);
+
+// Step 3: Check individual pool type
+const isGlobal = await poolManagerContract.isGlobalPool(poolId);
+
+// Step 4: Get community pool owner
+if (!isGlobal) {
+  const owner = await poolManagerContract.getPoolOwner(poolId);
+  console.log(`Pool #${poolId} owned by: ${owner}`);
+}
+```
+
+**Display Recommendations:**
+
+```jsx
+<PoolCard>
+  <PoolHeader>
+    <PoolTitle>Pool #{poolId}</PoolTitle>
+    {isGlobalPool ? (
+      <PoolBadge variant="official">Official Pool</PoolBadge>
+    ) : (
+      <PoolBadge variant="community">Community Pool</PoolBadge>
+    )}
+  </PoolHeader>
+
+  {!isGlobalPool && (
+    <PoolOwnerInfo>
+      <Label>Created by:</Label>
+      <OwnerAddress>{formatAddress(poolOwner)}</OwnerAddress>
+      <PlatformFee>
+        Platform Fee: {poolPlatformFeePercentage}%
+      </PlatformFee>
+    </PoolOwnerInfo>
+  )}
+
+  <PoolDetails>
+    <EntryFee>{formatCost(entryFee, feeToken)}</EntryFee>
+    <WinRate>{formatWinRate(winRate)}%</WinRate>
+    <PrizeCount>{prizeCount} Prizes</PrizeCount>
+  </PoolDetails>
+</PoolCard>
+```
+
+**Pool Type Badge Styling:**
+
+| Pool Type | Badge Color | Icon | Tooltip |
+|-----------|------------|------|---------|
+| Global | Blue/Purple | Shield | "Official pool created by the LazyLotto team" |
+| Community | Green/Teal | Users | "Community pool created by {ownerAddress}" |
+| Community (Paused) | Yellow | Pause | "Pool is temporarily paused by the owner" |
+| Community (Closed) | Red/Gray | Lock | "Pool is permanently closed" |
+
+---
+
+#### 10.2 Create a Community Pool
+
+**Objective:** Full flow for users to create their own lottery pool
+
+**Implementation Steps:**
+
+```javascript
+async function createCommunityPool({
+  name,           // Pool name (e.g., "My Community Pool")
+  symbol,         // Token symbol (e.g., "MCP")
+  memo,           // Description (max 100 chars)
+  ticketCID,      // IPFS CID for ticket NFT metadata
+  winCID,         // IPFS CID for winning ticket NFT metadata
+  winRatePercent, // Win rate as percentage (e.g., 1.5 for 1.5%)
+  entryFeeHbar,   // Entry fee in HBAR (e.g., 10)
+  feeToken,       // Fee token address (address(0) for HBAR)
+  royalties,      // Optional royalty config array (usually [])
+}) {
+  const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+  // ─── PHASE 1: Check creation fees ────────────────────────────
+  const [hbarFee, lazyFee] = await poolManagerContract.getCreationFees();
+
+  console.log('Creation fees:');
+  console.log(`  HBAR: ${formatHbar(hbarFee)}`);
+  console.log(`  LAZY: ${formatLazy(lazyFee)}`);
+
+  // ─── PHASE 2: Estimate total HBAR cost ───────────────────────
+  // Token creation on Hedera costs ~20 HBAR
+  const TOKEN_CREATION_COST = ethers.parseUnits('20', 8); // 20 HBAR in tinybars
+  const totalHbarNeeded = BigInt(hbarFee) + TOKEN_CREATION_COST;
+
+  // ─── PHASE 3: Validate user balances ─────────────────────────
+  const hbarBalance = await checkMirrorHbarBalance(env, userAccountId);
+  const lazyBalance = await checkMirrorBalance(env, userAccountId, lazyTokenId);
+
+  if (BigInt(hbarBalance) < totalHbarNeeded) {
+    throw new Error(
+      `Insufficient HBAR. Need ${formatHbar(totalHbarNeeded)}, ` +
+      `have ${formatHbar(hbarBalance)}`
+    );
+  }
+
+  if (BigInt(lazyBalance) < BigInt(lazyFee)) {
+    throw new Error(
+      `Insufficient LAZY. Need ${formatLazy(lazyFee)}, ` +
+      `have ${formatLazy(lazyBalance)}`
+    );
+  }
+
+  // ─── PHASE 4: Approve LAZY to LazyGasStation ─────────────────
+  // IMPORTANT: LAZY approval goes to LazyGasStation, NOT storage contract
+  if (BigInt(lazyFee) > 0n) {
+    const lazyGasStationAddress = await getLazyGasStationAddress();
+    const lazyTokenContract = new ethers.Contract(lazyTokenId, ERC20_ABI, signer);
+
+    const currentAllowance = await lazyTokenContract.allowance(
+      userAddress,
+      lazyGasStationAddress
+    );
+
+    if (currentAllowance < BigInt(lazyFee)) {
+      // Approve 2x for future transactions
+      const approveTx = await lazyTokenContract.approve(
+        lazyGasStationAddress,
+        BigInt(lazyFee) * 2n
+      );
+      await approveTx.wait();
+    }
+  }
+
+  // ─── PHASE 5: Convert parameters ────────────────────────────
+  // Win rate: convert percentage to thousandths of basis points
+  // 1% = 1,000,000 thousandths of bps
+  const winRate = Math.floor(winRatePercent * 1_000_000 / 100);
+
+  // Entry fee: convert HBAR to tinybars
+  const entryFee = ethers.parseUnits(String(entryFeeHbar), 8);
+
+  // ─── PHASE 6: Execute pool creation ──────────────────────────
+  const tx = await lazyLottoContract.createPool(
+    name,
+    symbol,
+    memo || name,
+    royalties || [],
+    ticketCID,
+    winCID,
+    winRate,
+    entryFee,
+    feeToken || ZERO_ADDRESS,
+    {
+      value: totalHbarNeeded,
+      gasLimit: 3_500_000,
+    }
+  );
+
+  const receipt = await tx.wait();
+
+  // ─── PHASE 7: Extract pool ID from events ───────────────────
+  const poolCreatedEvent = receipt.events?.find(
+    e => e.event === 'PoolCreated'
+  );
+  const newPoolId = poolCreatedEvent
+    ? Number(poolCreatedEvent.args.poolId)
+    : Number(await lazyLottoContract.totalPools()) - 1;
+
+  // ─── PHASE 8: Verify creation ───────────────────────────────
+  const owner = await poolManagerContract.getPoolOwner(newPoolId);
+  const isOwner = owner.toLowerCase() === userAddress.toLowerCase();
+
+  return {
+    poolId: newPoolId,
+    verified: isOwner,
+    transactionHash: receipt.transactionHash,
+  };
+}
+```
+
+**Critical Approval Pattern:**
+```javascript
+// ❌ WRONG - Approving LAZY to storage contract for pool creation
+const storageAddress = await lazyLottoContract.storageContract();
+await lazyToken.approve(storageAddress, lazyFee);
+
+// ❌ WRONG - Approving LAZY to LazyLotto for pool creation
+await lazyToken.approve(lazyLottoAddress, lazyFee);
+
+// ✅ CORRECT - Approve LAZY to LazyGasStation
+// Pool creation fees are drawn via LazyGasStation.drawLazyFrom()
+const gasStationAddress = await getLazyGasStationAddress();
+await lazyToken.approve(gasStationAddress, lazyFee);
+```
+
+**Display Recommendations:**
+
+```jsx
+<CreatePoolFlow>
+  {/* Step 1: Fee Display */}
+  <FeeBreakdown>
+    <SectionTitle>Pool Creation Costs</SectionTitle>
+    <FeeRow>
+      <Label>HBAR Creation Fee:</Label>
+      <Value>{formatHbar(hbarFee)}</Value>
+    </FeeRow>
+    <FeeRow>
+      <Label>LAZY Creation Fee:</Label>
+      <Value>{formatLazy(lazyFee)}</Value>
+    </FeeRow>
+    <FeeRow>
+      <Label>Token Creation (Hedera):</Label>
+      <Value>~20 HBAR (estimated)</Value>
+    </FeeRow>
+    <Divider />
+    <FeeRow total>
+      <Label>Total HBAR:</Label>
+      <Value>{formatHbar(totalHbarNeeded)}</Value>
+    </FeeRow>
+    <FeeRow total>
+      <Label>Total LAZY:</Label>
+      <Value>{formatLazy(lazyFee)}</Value>
+    </FeeRow>
+  </FeeBreakdown>
+
+  {/* Step 2: Pool Configuration */}
+  <PoolConfig>
+    <SectionTitle>Pool Settings</SectionTitle>
+    <Input label="Pool Name" value={name} onChange={setName} maxLength={50} required />
+    <Input label="Symbol" value={symbol} onChange={setSymbol} maxLength={10} required />
+    <Input label="Description" value={memo} onChange={setMemo} maxLength={100} />
+    <NumberInput
+      label="Win Rate (%)"
+      value={winRate}
+      onChange={setWinRate}
+      min={0.0001}
+      max={100}
+      step={0.01}
+      hint="Higher rates attract more players but cost more in prizes"
+    />
+    <NumberInput
+      label="Entry Fee (HBAR)"
+      value={entryFee}
+      onChange={setEntryFee}
+      min={0.01}
+      hint="Cost per ticket for your pool"
+    />
+    <CIDInput label="Ticket NFT Art (CID)" value={ticketCID} onChange={setTicketCID} />
+    <CIDInput label="Win NFT Art (CID)" value={winCID} onChange={setWinCID} />
+  </PoolConfig>
+
+  {/* Step 3: Platform Fee Notice */}
+  <InfoBox>
+    <InfoText>
+      The platform will take {platformFeePercentage}% of your pool's entry fee proceeds.
+      This percentage is locked at creation time and cannot be changed later.
+      You will receive {100 - platformFeePercentage}% of all proceeds.
+    </InfoText>
+  </InfoBox>
+
+  {/* Step 4: Confirmation */}
+  <ConfirmButton
+    disabled={!isValid || insufficientBalance}
+    onClick={handleCreate}
+  >
+    Create Pool ({formatHbar(totalHbarNeeded)} + {formatLazy(lazyFee)})
+  </ConfirmButton>
+</CreatePoolFlow>
+```
+
+**Post-Creation Success:**
+```jsx
+<PoolCreatedSuccess>
+  <SuccessMessage>Pool #{newPoolId} Created Successfully!</SuccessMessage>
+
+  <NextSteps>
+    <Step number={1}>
+      <StepTitle>Add Prizes</StepTitle>
+      <StepDesc>Add HBAR, tokens, or NFTs as prizes for your pool</StepDesc>
+      <StepAction onClick={() => navigateTo(`/pool/${newPoolId}/add-prizes`)}>
+        Add Prizes
+      </StepAction>
+    </Step>
+    <Step number={2}>
+      <StepTitle>Share Your Pool</StepTitle>
+      <StepDesc>Share pool link with your community</StepDesc>
+      <StepAction onClick={() => copyPoolLink(newPoolId)}>
+        Copy Link
+      </StepAction>
+    </Step>
+    <Step number={3}>
+      <StepTitle>Monitor Proceeds</StepTitle>
+      <StepDesc>Track earnings from entry fees</StepDesc>
+      <StepAction onClick={() => navigateTo(`/pool/${newPoolId}/proceeds`)}>
+        View Dashboard
+      </StepAction>
+    </Step>
+  </NextSteps>
+</PoolCreatedSuccess>
+```
+
+---
+
+#### 10.3 Manage Your Pool
+
+**Objective:** Allow pool owners to add prizes, pause/unpause, and delegate prize management
+
+**Permission Checking Pattern:**
+
+```javascript
+// Always verify permissions before showing management UI
+async function getPoolManagementPermissions(poolId, userAddress) {
+  const [canManage, canAdd, owner, prizeManager] = await Promise.all([
+    poolManagerContract.canManagePool(poolId, userAddress),
+    poolManagerContract.canAddPrizes(poolId, userAddress),
+    poolManagerContract.getPoolOwner(poolId),
+    poolManagerContract.getPoolPrizeManager(poolId),
+  ]);
+
+  const isOwner = owner.toLowerCase() === userAddress.toLowerCase();
+  const isPrizeManager = prizeManager.toLowerCase() === userAddress.toLowerCase();
+
+  return {
+    canManage,      // Can pause, unpause, close, remove prizes
+    canAdd,         // Can add prizes
+    isOwner,        // Is the pool owner
+    isPrizeManager, // Is the designated prize manager
+    owner,          // Pool owner address
+    prizeManager,   // Prize manager address (address(0) if none)
+  };
+}
+```
+
+**Add Prizes to Your Pool:**
+
+```javascript
+async function addPrizeToPool(poolId, {
+  token,       // Prize token address (address(0) for HBAR)
+  amount,      // Fungible token amount (0 if NFT-only)
+  nftTokens,   // Array of NFT token addresses
+  nftSerials,  // Array of arrays of serial numbers
+}) {
+  const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+  // Step 1: Verify user can add prizes
+  const canAdd = await poolManagerContract.canAddPrizes(poolId, userAddress);
+  if (!canAdd) {
+    throw new Error('You do not have permission to add prizes to this pool');
+  }
+
+  // Step 2: Approve tokens to storage contract (NOT LazyLotto)
+  const storageAddress = await lazyLottoContract.storageContract();
+
+  if (token !== ZERO_ADDRESS && amount > 0) {
+    const tokenContract = new ethers.Contract(token, ERC20_ABI, signer);
+    const allowance = await tokenContract.allowance(userAddress, storageAddress);
+    if (allowance < amount) {
+      await (await tokenContract.approve(storageAddress, amount)).wait();
+    }
+  }
+
+  // Step 3: Approve NFTs to storage contract
+  for (const nftToken of nftTokens) {
+    const nftContract = new ethers.Contract(nftToken, ERC721_ABI, signer);
+    const isApproved = await nftContract.isApprovedForAll(userAddress, storageAddress);
+    if (!isApproved) {
+      await (await nftContract.setApprovalForAll(storageAddress, true)).wait();
+    }
+  }
+
+  // Step 4: Add the prize package
+  const tx = await lazyLottoContract.addPrizePackage(
+    poolId,
+    token || ZERO_ADDRESS,
+    amount || 0,
+    nftTokens || [],
+    nftSerials || [],
+    {
+      value: token === ZERO_ADDRESS ? amount : 0, // Send HBAR if prize is HBAR
+      gasLimit: 1_500_000,
+    }
+  );
+
+  return await tx.wait();
+}
+```
+
+**Pause/Unpause Pool:**
+
+```javascript
+async function togglePoolPause(poolId, shouldPause) {
+  // Verify management permission
+  const canManage = await poolManagerContract.canManagePool(poolId, userAddress);
+  if (!canManage) {
+    throw new Error('You do not have permission to manage this pool');
+  }
+
+  if (shouldPause) {
+    const tx = await lazyLottoContract.pausePool(poolId, { gasLimit: 300_000 });
+    await tx.wait();
+  } else {
+    const tx = await lazyLottoContract.unpausePool(poolId, { gasLimit: 300_000 });
+    await tx.wait();
+  }
+}
+```
+
+**Set Prize Manager (Delegate):**
+
+```javascript
+async function setPoolPrizeManager(poolId, managerAddress) {
+  const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+  // Verify pool is a community pool (cannot set manager on global pools)
+  const isGlobal = await poolManagerContract.isGlobalPool(poolId);
+  if (isGlobal) {
+    throw new Error('Cannot set prize manager on global pools');
+  }
+
+  // Verify caller is pool owner or admin
+  const canManage = await poolManagerContract.canManagePool(poolId, userAddress);
+  if (!canManage) {
+    throw new Error('Only the pool owner can set a prize manager');
+  }
+
+  // Pass address(0) to remove existing prize manager
+  const tx = await poolManagerContract.setPoolPrizeManager(
+    poolId,
+    managerAddress || ZERO_ADDRESS,
+    { gasLimit: 300_000 }
+  );
+
+  return await tx.wait();
+}
+```
+
+**Display Recommendations:**
+
+```jsx
+<PoolManagementDashboard>
+  <SectionTitle>Manage Pool #{poolId}</SectionTitle>
+
+  {/* Permission-gated controls */}
+  {permissions.canManage && (
+    <ManagementControls>
+      <PauseToggle
+        paused={poolInfo.paused}
+        onToggle={() => togglePoolPause(poolId, !poolInfo.paused)}
+      >
+        {poolInfo.paused ? 'Resume Pool' : 'Pause Pool'}
+      </PauseToggle>
+
+      <DelegateSection>
+        <Label>Prize Manager (optional delegate):</Label>
+        <AddressInput
+          value={prizeManagerAddress}
+          onChange={setPrizeManagerAddress}
+          placeholder="0x... or leave empty to remove"
+        />
+        <Button onClick={() => setPoolPrizeManager(poolId, prizeManagerAddress)}>
+          {prizeManagerAddress ? 'Set Prize Manager' : 'Remove Prize Manager'}
+        </Button>
+      </DelegateSection>
+    </ManagementControls>
+  )}
+
+  {/* Prize addition (available to owner, prize manager, and global prize managers) */}
+  {permissions.canAdd && (
+    <AddPrizeSection>
+      <SectionTitle>Add Prize Package</SectionTitle>
+      <PrizeBuilder onSubmit={(prize) => addPrizeToPool(poolId, prize)} />
+    </AddPrizeSection>
+  )}
+
+  {/* Read-only view for non-owners */}
+  {!permissions.canManage && !permissions.canAdd && (
+    <InfoBox>
+      You do not have management permissions for this pool.
+    </InfoBox>
+  )}
+</PoolManagementDashboard>
+```
+
+---
+
+#### 10.4 View Pool Proceeds
+
+**Objective:** Display earned proceeds, platform fee split, and enable withdrawal
+
+**Implementation Steps:**
+
+```javascript
+async function getPoolProceedsInfo(poolId, feeToken) {
+  const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+  const token = feeToken || ZERO_ADDRESS;
+
+  // Get proceeds data
+  const [total, withdrawn] = await poolManagerContract.getPoolProceeds(poolId, token);
+  const platformFeePercentage = await poolManagerContract.getPoolPlatformFeePercentage(poolId);
+
+  const available = BigInt(total) - BigInt(withdrawn);
+
+  // Calculate split
+  const platformCut = (available * BigInt(platformFeePercentage)) / 100n;
+  const ownerShare = available - platformCut;
+
+  return {
+    totalProceeds: total,
+    withdrawnProceeds: withdrawn,
+    availableProceeds: available,
+    platformFeePercentage: Number(platformFeePercentage),
+    platformCut,
+    ownerShare,
+    token,
+  };
+}
+
+async function withdrawProceeds(poolId, token) {
+  const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+  // Verify there are proceeds to withdraw
+  const info = await getPoolProceedsInfo(poolId, token);
+  if (info.availableProceeds === 0n) {
+    throw new Error('No proceeds available to withdraw');
+  }
+
+  // Execute withdrawal (called on LazyLotto, not PoolManager)
+  const tx = await lazyLottoContract.withdrawPoolProceeds(
+    poolId,
+    token || ZERO_ADDRESS,
+    { gasLimit: 500_000 }
+  );
+
+  return await tx.wait();
+}
+```
+
+**Display Recommendations:**
+
+```jsx
+<PoolProceedsDashboard>
+  <SectionTitle>Pool #{poolId} Proceeds</SectionTitle>
+
+  <ProceedsBreakdown>
+    <ProceedsRow>
+      <Label>Total Earned:</Label>
+      <Value>{formatCost(totalProceeds, token)}</Value>
+    </ProceedsRow>
+    <ProceedsRow>
+      <Label>Already Withdrawn:</Label>
+      <Value muted>{formatCost(withdrawnProceeds, token)}</Value>
+    </ProceedsRow>
+    <Divider />
+    <ProceedsRow>
+      <Label>Available to Withdraw:</Label>
+      <Value highlight>{formatCost(availableProceeds, token)}</Value>
+    </ProceedsRow>
+  </ProceedsBreakdown>
+
+  <FeeSplitDisplay>
+    <SplitRow>
+      <Label>Your Share ({100 - platformFeePercentage}%):</Label>
+      <Value positive>{formatCost(ownerShare, token)}</Value>
+    </SplitRow>
+    <SplitRow>
+      <Label>Platform Fee ({platformFeePercentage}%):</Label>
+      <Value muted>{formatCost(platformCut, token)}</Value>
+    </SplitRow>
+    <InfoHint>
+      Platform fee was locked at {platformFeePercentage}% when this pool was created.
+      It cannot be changed retroactively.
+    </InfoHint>
+  </FeeSplitDisplay>
+
+  <WithdrawAction>
+    <Button
+      disabled={availableProceeds === 0n}
+      onClick={() => withdrawProceeds(poolId, token)}
+    >
+      Withdraw {formatCost(ownerShare, token)}
+    </Button>
+  </WithdrawAction>
+</PoolProceedsDashboard>
+```
+
+**User's Pool Portfolio:**
+
+```javascript
+// Fetch all pools owned by the current user
+async function getUserPoolPortfolio(userAddress) {
+  const poolIds = await poolManagerContract.getUserPools(userAddress);
+
+  const portfolio = await Promise.all(
+    poolIds.map(async (poolId) => {
+      const poolInfo = await lazyLottoContract.getPoolBasicInfo(poolId);
+      const feeToken = poolInfo[9]; // feeToken from tuple
+
+      const proceeds = await getPoolProceedsInfo(poolId, feeToken);
+
+      return {
+        poolId: Number(poolId),
+        poolInfo,
+        proceeds,
+      };
+    })
+  );
+
+  return portfolio;
+}
+```
+
+```jsx
+<UserPoolPortfolio>
+  <SectionTitle>My Pools ({pools.length})</SectionTitle>
+
+  {pools.length === 0 ? (
+    <EmptyState>
+      <EmptyMessage>You have not created any pools yet.</EmptyMessage>
+      <Button onClick={() => navigateTo('/create-pool')}>
+        Create Your First Pool
+      </Button>
+    </EmptyState>
+  ) : (
+    <PoolGrid>
+      {pools.map(({ poolId, poolInfo, proceeds }) => (
+        <OwnedPoolCard key={poolId}>
+          <PoolHeader>
+            <PoolTitle>Pool #{poolId}</PoolTitle>
+            <StatusBadge paused={poolInfo.paused} closed={poolInfo.closed} />
+          </PoolHeader>
+          <PoolStats>
+            <Stat label="Outstanding Entries" value={poolInfo.outstandingEntries} />
+            <Stat label="Prizes" value={poolInfo.prizeCount} />
+            <Stat label="Available Proceeds" value={formatCost(proceeds.ownerShare, proceeds.token)} />
+          </PoolStats>
+          <CardActions>
+            <Button size="small" onClick={() => navigateTo(`/pool/${poolId}/manage`)}>
+              Manage
+            </Button>
+            <Button
+              size="small"
+              variant="secondary"
+              disabled={proceeds.availableProceeds === 0n}
+              onClick={() => withdrawProceeds(poolId, proceeds.token)}
+            >
+              Withdraw
+            </Button>
+          </CardActions>
+        </OwnedPoolCard>
+      ))}
+    </PoolGrid>
+  )}
+</UserPoolPortfolio>
+```
+
+---
+
+#### 10.5 Transfer Pool Ownership
+
+**Objective:** Allow pool owners to transfer their pool to another address
+
+**Implementation Steps:**
+
+```javascript
+async function transferPoolOwnership(poolId, newOwnerAddress) {
+  const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+  // Step 1: Validate the pool is a community pool
+  const isGlobal = await poolManagerContract.isGlobalPool(poolId);
+  if (isGlobal) {
+    throw new Error('Cannot transfer ownership of global pools');
+  }
+
+  // Step 2: Validate new owner address
+  if (!newOwnerAddress || newOwnerAddress === ZERO_ADDRESS) {
+    throw new Error('New owner address cannot be zero');
+  }
+
+  // Step 3: Verify caller is current owner or admin
+  const currentOwner = await poolManagerContract.getPoolOwner(poolId);
+  const canManage = await poolManagerContract.canManagePool(poolId, userAddress);
+  if (!canManage) {
+    throw new Error('You do not have permission to transfer this pool');
+  }
+
+  // Step 4: Execute transfer
+  const tx = await poolManagerContract.transferPoolOwnership(
+    poolId,
+    newOwnerAddress,
+    { gasLimit: 300_000 }
+  );
+
+  const receipt = await tx.wait();
+
+  // Step 5: Verify transfer
+  const newOwner = await poolManagerContract.getPoolOwner(poolId);
+  const transferVerified = newOwner.toLowerCase() === newOwnerAddress.toLowerCase();
+
+  return {
+    previousOwner: currentOwner,
+    newOwner,
+    verified: transferVerified,
+    transactionHash: receipt.transactionHash,
+  };
+}
+```
+
+**Display Recommendations:**
+
+```jsx
+<TransferOwnershipFlow>
+  <SectionTitle>Transfer Pool #{poolId} Ownership</SectionTitle>
+
+  <WarningBox>
+    <WarningTitle>This action is irreversible</WarningTitle>
+    <WarningText>
+      Transferring ownership will give the new owner full control of this pool,
+      including the ability to pause, close, add prizes, set prize managers,
+      and withdraw future proceeds.
+    </WarningText>
+  </WarningBox>
+
+  <CurrentOwner>
+    <Label>Current Owner:</Label>
+    <Address>{formatAddress(currentOwner)}</Address>
+  </CurrentOwner>
+
+  <TransferForm>
+    <AddressInput
+      label="New Owner Address"
+      value={newOwner}
+      onChange={setNewOwner}
+      placeholder="0x..."
+      required
+    />
+
+    <ConfirmCheckbox
+      checked={confirmed}
+      onChange={setConfirmed}
+      label="I understand this transfer is permanent and cannot be undone"
+    />
+
+    <Button
+      variant="danger"
+      disabled={!newOwner || !confirmed}
+      onClick={() => transferPoolOwnership(poolId, newOwner)}
+    >
+      Transfer Ownership
+    </Button>
+  </TransferForm>
+</TransferOwnershipFlow>
+```
+
+---
+
+#### 10.6 Close a Pool
+
+**Objective:** Permanently close a pool and recover remaining prizes
+
+**Requirements:**
+- Pool must have **zero outstanding entries** (no unrolled memory tickets)
+- Pool's ticket NFT must have **zero total supply** (all NFT tickets burned/redeemed)
+- Only the pool owner or a global admin can close a pool
+
+**Implementation Steps:**
+
+```javascript
+async function closePool(poolId) {
+  // Step 1: Get pool state
+  const poolInfo = await lazyLottoContract.getPoolBasicInfo(poolId);
+  const outstandingEntries = Number(poolInfo[5]); // outstandingEntries from tuple
+
+  // Step 2: Validate pool can be closed
+  if (outstandingEntries > 0) {
+    throw new Error(
+      `Cannot close pool: ${outstandingEntries} outstanding entries remain. ` +
+      `All users must roll or have their entries resolved first.`
+    );
+  }
+
+  // Step 3: Verify permissions
+  const canManage = await poolManagerContract.canManagePool(poolId, userAddress);
+  if (!canManage) {
+    throw new Error('You do not have permission to close this pool');
+  }
+
+  // Step 4: Execute close
+  const tx = await lazyLottoContract.closePool(poolId, { gasLimit: 500_000 });
+  const receipt = await tx.wait();
+
+  return {
+    poolId,
+    transactionHash: receipt.transactionHash,
+  };
+}
+```
+
+**Pre-Close Validation Display:**
+
+```jsx
+<ClosePoolFlow>
+  <SectionTitle>Close Pool #{poolId}</SectionTitle>
+
+  <WarningBox>
+    <WarningTitle>Permanently Close Pool</WarningTitle>
+    <WarningText>
+      Closing a pool is permanent. No more tickets can be purchased.
+      Once closed, remaining prizes can be recovered.
+    </WarningText>
+  </WarningBox>
+
+  {/* Pre-close checklist */}
+  <Checklist>
+    <CheckItem
+      passed={outstandingEntries === 0}
+      label={`Outstanding entries: ${outstandingEntries}`}
+      failMessage="All entries must be rolled before closing"
+    />
+    <CheckItem
+      passed={nftSupply === 0}
+      label={`Outstanding ticket NFTs: ${nftSupply}`}
+      failMessage="All ticket NFTs must be redeemed before closing"
+    />
+    <CheckItem
+      passed={canManage}
+      label="You have management permissions"
+      failMessage="Only the pool owner or admin can close this pool"
+    />
+  </Checklist>
+
+  {allChecksPassed ? (
+    <ConfirmSection>
+      <ConfirmCheckbox
+        checked={confirmed}
+        onChange={setConfirmed}
+        label="I understand this action is permanent"
+      />
+      <Button
+        variant="danger"
+        disabled={!confirmed}
+        onClick={() => closePool(poolId)}
+      >
+        Close Pool Permanently
+      </Button>
+    </ConfirmSection>
+  ) : (
+    <BlockedMessage>
+      Cannot close this pool until all conditions above are met.
+    </BlockedMessage>
+  )}
+</ClosePoolFlow>
+```
+
+**Error Reference for Community Pool Operations:**
+
+| Error | Cause | User-Facing Message |
+|-------|-------|---------------------|
+| `NotAuthorized()` | Caller is not pool owner or admin | "You do not have permission to perform this action on this pool." |
+| `CannotTransferGlobalPools()` | Attempting to transfer a global pool | "Official pools cannot be transferred." |
+| `CannotSetManagerForGlobalPools()` | Setting prize manager on global pool | "Prize managers can only be set on community pools." |
+| `CannotWithdrawFromGlobalPools()` | Withdrawing proceeds from global pool | "Proceeds cannot be withdrawn from official pools." |
+| `NothingToWithdraw()` | No available proceeds | "There are no proceeds available to withdraw at this time." |
+| `InsufficientHbarFee(required, provided)` | Not enough HBAR sent for creation | "Insufficient HBAR. Required: {required}, Provided: {provided}" |
+| `EntriesOutstanding(entries, supply)` | Trying to close pool with active entries | "Cannot close pool: {entries} entries and {supply} NFT tickets are still outstanding." |
+| `BadParameters()` | Invalid pool creation parameters | "Invalid parameters. Check name, symbol, win rate, and entry fee." |
+| `NotEnoughHbar(required, provided)` | HBAR too low for creation + token | "Not enough HBAR for pool creation. Need {required} (includes token creation cost)." |
+
+---
+
 ## Data Fetching Patterns
 
 ### Polling vs. Event Listening
@@ -2345,10 +3314,12 @@ This guide provides the foundation for building a comprehensive, user-friendly f
 5. **Provide clear visual feedback** at every step
 6. **Cache frequently accessed data** to improve performance
 7. **Test thoroughly** on mobile devices
+8. **Distinguish global vs community pools** using PoolManager queries and display appropriate badges
+9. **Approve LAZY to LazyGasStation** (not storage) for community pool creation fees
+10. **Check permissions before showing management UI** using `canManagePool()` and `canAddPrizes()`
 
 For additional support or questions, refer to:
 - [LazyLotto Business Logic Documentation](./LazyLotto-BUSINESS_LOGIC.md)
+- [LazyLotto Admin UX Implementation Guide](./LazyLotto-ADMIN_UX_IMPLEMENTATION_GUIDE.md)
 - [LazyLotto Testing Plan](./LazyLotto-TESTING_PLAN.md)
 - Contract source code and inline documentation
-
-Happy building! 🎰✨

@@ -26,17 +26,15 @@
 const {
 	AccountId,
 	ContractId,
-	TokenId,
 	Hbar,
 	HbarUnit,
 } = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
 const fs = require('fs');
-const axios = require('axios');
 require('dotenv').config();
 
-const { readOnlyEVMFromMirrorNode } = require('../../utils/solidityHelpers');
-const { getBaseURL, getTokenDetails, homebrewPopulateAccountNum, EntityType } = require('../../utils/hederaMirrorHelpers');
+const { getTokenDetails, homebrewPopulateAccountNum, EntityType } = require('../../utils/hederaMirrorHelpers');
+const { loadInterface } = require('../../utils/abiLoader');
+const { queryContract } = require('../../utils/queryHelpers');
 
 // CLI argument parsing
 const args = process.argv.slice(2);
@@ -52,11 +50,11 @@ const env = process.env.ENVIRONMENT ?? 'testnet';
 const operatorId = process.env.ACCOUNT_ID ? AccountId.fromString(process.env.ACCOUNT_ID) : null;
 
 // Contract ID (from arg or .env)
-let lazyLottoId = contractArg
+const lazyLottoId = contractArg
 	? ContractId.fromString(contractArg.split('=')[1])
 	: (process.env.LAZY_LOTTO_CONTRACT_ID ? ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID) : null);
 
-let poolManagerId = process.env.LAZY_LOTTO_POOL_MANAGER_ID
+const poolManagerId = process.env.LAZY_LOTTO_POOL_MANAGER_ID
 	? ContractId.fromString(process.env.LAZY_LOTTO_POOL_MANAGER_ID)
 	: null;
 
@@ -102,9 +100,9 @@ Required .env Variables:
 `);
 }
 
-function log(...args) {
+function log(...logArgs) {
 	if (verbose) {
-		console.log(...args);
+		console.log(...logArgs);
 	}
 }
 
@@ -140,9 +138,7 @@ async function fetchPoolDetails(poolId) {
 
 	try {
 		// Get basic pool info
-		let encoded = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [poolId]);
-		let data = await readOnlyEVMFromMirrorNode(env, lazyLottoId, encoded, operatorId, false);
-		const basicInfo = lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', data);
+		const basicInfo = await queryContract(env, lazyLottoId, lazyLottoIface, 'getPoolBasicInfo', [poolId], operatorId);
 
 		// [ticketCID, winCID, winRate, entryFee, prizeCount, outstandingEntries, poolTokenId, paused, closed, feeToken]
 		const winRate = Number(basicInfo[2]);
@@ -195,9 +191,8 @@ async function fetchPoolDetails(poolId) {
 		// Try to get pool owner (from PoolManager if available)
 		if (poolManagerId) {
 			try {
-				encoded = poolManagerIface.encodeFunctionData('getPoolOwner', [poolId]);
-				data = await readOnlyEVMFromMirrorNode(env, poolManagerId, encoded, operatorId, false);
-				const ownerAddr = poolManagerIface.decodeFunctionResult('getPoolOwner', data)[0];
+				const ownerResult = await queryContract(env, poolManagerId, poolManagerIface, 'getPoolOwner', [poolId], operatorId);
+				const ownerAddr = ownerResult[0];
 
 				if (ownerAddr !== '0x0000000000000000000000000000000000000000') {
 					pool.owner = await convertToHederaId(ownerAddr, EntityType.ACCOUNT);
@@ -213,9 +208,7 @@ async function fetchPoolDetails(poolId) {
 		if (prizeCount > 0 && prizeCount <= 10) {
 			for (let i = 0; i < prizeCount; i++) {
 				try {
-					encoded = lazyLottoIface.encodeFunctionData('getPrizePackage', [poolId, i]);
-					data = await readOnlyEVMFromMirrorNode(env, lazyLottoId, encoded, operatorId, false);
-					const prizePackage = lazyLottoIface.decodeFunctionResult('getPrizePackage', data);
+					const prizePackage = await queryContract(env, lazyLottoId, lazyLottoIface, 'getPrizePackage', [poolId, i], operatorId);
 
 					const prizeTokenAddr = prizePackage[0].token;
 					const prizeAmount = Number(prizePackage[0].amount);
@@ -280,15 +273,13 @@ async function indexPools() {
 
 	// Load interfaces
 	try {
-		const lazyLottoJson = JSON.parse(fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'));
-		lazyLottoIface = new ethers.Interface(lazyLottoJson.abi);
+		lazyLottoIface = loadInterface('LazyLotto');
 
 		if (poolManagerId) {
-			const poolManagerJson = JSON.parse(fs.readFileSync('./artifacts/contracts/LazyLottoPoolManager.sol/LazyLottoPoolManager.json'));
-			poolManagerIface = new ethers.Interface(poolManagerJson.abi);
+			poolManagerIface = loadInterface('LazyLottoPoolManager');
 		}
 	}
-	catch (error) {
+	catch {
 		console.error('ERROR: Could not load contract ABIs. Run `npx hardhat compile` first.');
 		process.exit(1);
 	}
@@ -298,9 +289,8 @@ async function indexPools() {
 	let totalPools = 0;
 
 	try {
-		const encoded = lazyLottoIface.encodeFunctionData('totalPools');
-		const data = await readOnlyEVMFromMirrorNode(env, lazyLottoId, encoded, operatorId, false);
-		totalPools = Number(lazyLottoIface.decodeFunctionResult('totalPools', data)[0]);
+		const result = await queryContract(env, lazyLottoId, lazyLottoIface, 'totalPools', [], operatorId);
+		totalPools = Number(result[0]);
 	}
 	catch (error) {
 		console.error('ERROR: Could not query total pools:', error.message);

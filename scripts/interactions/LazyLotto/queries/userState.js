@@ -10,43 +10,24 @@
  * Usage: node scripts/interactions/LazyLotto/queries/userState.js [userAddress]
  */
 
+require('dotenv').config();
 const {
-	Client,
 	AccountId,
-	PrivateKey,
-	ContractId,
 	Hbar,
 	HbarUnit,
 } = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
-require('dotenv').config();
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { queryContract } = require('../../../../utils/queryHelpers');
+const { prompt } = require('../../../../utils/promptHelpers');
 
 const { getTokenDetails, getSerialsOwned, homebrewPopulateAccountEvmAddress } = require('../../../../utils/hederaMirrorHelpers');
 const { homebrewPopulateAccountNum, EntityType } = require('../../../../utils/hederaMirrorHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-const poolManagerId = process.env.LAZY_LOTTO_POOL_MANAGER_ID ? ContractId.fromString(process.env.LAZY_LOTTO_POOL_MANAGER_ID) : null;
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
+const poolManagerId = process.env.LAZY_LOTTO_POOL_MANAGER_ID ? getContractId('LAZY_LOTTO_POOL_MANAGER_ID') : null;
 
 async function convertToHederaId(evmAddress, entityType = null) {
 	if (!evmAddress.startsWith('0x')) return evmAddress;
@@ -89,24 +70,8 @@ async function getUserState() {
 			userHederaId = await homebrewPopulateAccountNum(env, userEvmAddress, EntityType.ACCOUNT);
 		}
 
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║           LazyLotto User State Query                      ║');
@@ -116,20 +81,12 @@ async function getUserState() {
 		console.log(`👤 User: ${userHederaId}\n`);
 
 		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
-
-		// Import helper
-		const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
+		const lazyLottoIface = loadInterface('LazyLotto');
 
 		console.log('🔍 Fetching user data...\n');
 
 		// Get user's boost
-		let encodedCommand = lazyLottoIface.encodeFunctionData('calculateBoost', [userEvmAddress]);
-		let result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const boostBps = lazyLottoIface.decodeFunctionResult('calculateBoost', result);
+		const boostBps = await queryContract(env, contractId, lazyLottoIface, 'calculateBoost', [userEvmAddress], operatorId);
 
 		console.log('═══════════════════════════════════════════════════════════');
 		console.log('  WIN RATE BOOST');
@@ -138,23 +95,17 @@ async function getUserState() {
 		console.log('═══════════════════════════════════════════════════════════\n');
 
 		// Get total pools
-		encodedCommand = lazyLottoIface.encodeFunctionData('totalPools');
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const totalPools = lazyLottoIface.decodeFunctionResult('totalPools', result);
+		const totalPools = await queryContract(env, contractId, lazyLottoIface, 'totalPools', [], operatorId);
 
 		// Get user entries for each pool
 		const userEntries = [];
 		for (let i = 0; i < Number(totalPools[0]); i++) {
-			encodedCommand = lazyLottoIface.encodeFunctionData('getUsersEntries', [i, userEvmAddress]);
-			result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-			const entries = lazyLottoIface.decodeFunctionResult('getUsersEntries', result);
+			const entries = await queryContract(env, contractId, lazyLottoIface, 'getUsersEntries', [i, userEvmAddress], operatorId);
 
 			if (Number(entries[0]) > 0) {
 				// Get pool details
-				encodedCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [i]);
-				result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-				const [, , winRate, entryFee, , , poolTokenId, , , feeToken] =
-					lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', result);
+				const poolBasicInfo = await queryContract(env, contractId, lazyLottoIface, 'getPoolBasicInfo', [i], operatorId);
+				const [, , winRate, entryFee, , , poolTokenId, , , feeToken] = poolBasicInfo;
 				userEntries.push({
 					poolId: i,
 					entryCount: Number(entries[0]),
@@ -188,8 +139,8 @@ async function getUserState() {
 					formattedFee = new Hbar(Number(entry.entryFee), HbarUnit.Tinybar).toString();
 				}
 				else {
-					const tokenDets = await getTokenDetails(env, entry.feeToken);
-					formattedFee = `${Number(entry.entryFee) / (10 ** tokenDets.decimals)} ${tokenDets.symbol}`;
+					const tokenDetsResult = await getTokenDetails(env, entry.feeToken);
+					formattedFee = `${Number(entry.entryFee) / (10 ** tokenDetsResult.decimals)} ${tokenDetsResult.symbol}`;
 				}
 				console.log(`    Entry Fee:  ${formattedFee}`);
 				console.log();
@@ -207,9 +158,8 @@ async function getUserState() {
 
 		for (let i = 0; i < Number(totalPools[0]); i++) {
 			// Get pool details to find pool token
-			encodedCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [i]);
-			result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-			const [, , , , , , poolTokenIdEvm] = lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', result);
+			const poolBasicInfo = await queryContract(env, contractId, lazyLottoIface, 'getPoolBasicInfo', [i], operatorId);
+			const [, , , , , , poolTokenIdEvm] = poolBasicInfo;
 			const poolTokenId = await convertToHederaId(poolTokenIdEvm, EntityType.TOKEN);
 
 			// Check if user owns any NFTs from this pool
@@ -237,9 +187,7 @@ async function getUserState() {
 
 				for (const serial of ownedSerials) {
 					// Query if this NFT is a prize
-					encodedCommand = lazyLottoIface.encodeFunctionData('getPendingPrizesByNFT', [poolTokenIdEvm, serial]);
-					result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-					const pendingPrize = lazyLottoIface.decodeFunctionResult('getPendingPrizesByNFT', result)[0];
+					const pendingPrize = (await queryContract(env, contractId, lazyLottoIface, 'getPendingPrizesByNFT', [poolTokenIdEvm, serial], operatorId))[0];
 
 					if (pendingPrize.asNFT) {
 						prizeData.push({ serial, pendingPrize });
@@ -272,8 +220,8 @@ async function getUserState() {
 								formattedAmount = new Hbar(Number(prize.amount), HbarUnit.Tinybar).toString();
 							}
 							else {
-								const tokenDets = await getTokenDetails(env, tokenId);
-								formattedAmount = `${Number(prize.amount) / (10 ** tokenDets.decimals)} ${tokenDets.symbol}`;
+								const tokenDetsResult = await getTokenDetails(env, tokenId);
+								formattedAmount = `${Number(prize.amount) / (10 ** tokenDetsResult.decimals)} ${tokenDetsResult.symbol}`;
 							}
 							prizeItems.push(formattedAmount);
 						}
@@ -323,14 +271,10 @@ async function getUserState() {
 		console.log('═══════════════════════════════════════════════════════════\n');
 
 		// Get pending prizes count first
-		const countQuery = lazyLottoIface.encodeFunctionData('getPendingPrizesCount', [userEvmAddress]);
-		const countResult = await readOnlyEVMFromMirrorNode(env, contractId, countQuery, operatorId, false);
-		const prizeCount = lazyLottoIface.decodeFunctionResult('getPendingPrizesCount', countResult)[0];
+		const prizeCount = (await queryContract(env, contractId, lazyLottoIface, 'getPendingPrizesCount', [userEvmAddress], operatorId))[0];
 
 		// Get all pending prizes
-		encodedCommand = lazyLottoIface.encodeFunctionData('getPendingPrizesPage', [userEvmAddress, 0, Number(prizeCount)]);
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const pendingPrizes = lazyLottoIface.decodeFunctionResult('getPendingPrizesPage', result);
+		const pendingPrizes = await queryContract(env, contractId, lazyLottoIface, 'getPendingPrizesPage', [userEvmAddress, 0, Number(prizeCount)], operatorId);
 
 		console.log('═══════════════════════════════════════════════════════════');
 		console.log('  PENDING PRIZES');
@@ -362,8 +306,8 @@ async function getUserState() {
 						formattedAmount = new Hbar(Number(prize.amount), HbarUnit.Tinybar).toString();
 					}
 					else {
-						const tokenDets = await getTokenDetails(env, tokenId);
-						formattedAmount = `${Number(prize.amount) / (10 ** tokenDets.decimals)} ${tokenDets.symbol}`;
+						const tokenDetsResult = await getTokenDetails(env, tokenId);
+						formattedAmount = `${Number(prize.amount) / (10 ** tokenDetsResult.decimals)} ${tokenDetsResult.symbol}`;
 					}
 					prizeItems.push(formattedAmount);
 				}
@@ -405,15 +349,10 @@ async function getUserState() {
 		// Owned Pools
 		if (poolManagerId) {
 			try {
-				const poolManagerJson = JSON.parse(
-					fs.readFileSync('./artifacts/contracts/LazyLottoPoolManager.sol/LazyLottoPoolManager.json'),
-				);
-				const poolManagerIface = new ethers.Interface(poolManagerJson.abi);
+				const poolManagerIface = loadInterface('LazyLottoPoolManager');
 
 				// Get user's pools
-				encodedCommand = poolManagerIface.encodeFunctionData('getUserPools', [userEvmAddress, 0, 100]);
-				result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-				const userPools = poolManagerIface.decodeFunctionResult('getUserPools', result);
+				const userPools = await queryContract(env, poolManagerId, poolManagerIface, 'getUserPools', [userEvmAddress], operatorId);
 				const ownedPoolIds = userPools[0].map(id => Number(id));
 
 				if (ownedPoolIds.length > 0) {
@@ -424,16 +363,16 @@ async function getUserState() {
 
 					let totalWithdrawable = 0n;
 
-					for (const poolId of ownedPoolIds) {
-						// Get pool proceeds
-						encodedCommand = poolManagerIface.encodeFunctionData('getPoolProceeds', [poolId]);
-						result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-						const proceeds = poolManagerIface.decodeFunctionResult('getPoolProceeds', result);
+					for (const ownedPoolId of ownedPoolIds) {
+						// Get pool basic info to get feeToken
+						const ownedPoolInfo = await queryContract(env, contractId, lazyLottoIface, 'getPoolBasicInfo', [ownedPoolId], operatorId);
+						const ownedPoolFeeToken = ownedPoolInfo[9];
+
+						// Get pool proceeds (pass feeToken from getPoolBasicInfo result index [9])
+						const proceeds = await queryContract(env, poolManagerId, poolManagerIface, 'getPoolProceeds', [ownedPoolId, ownedPoolFeeToken], operatorId);
 
 						// Get platform fee %
-						encodedCommand = poolManagerIface.encodeFunctionData('getPoolPlatformFeePercentage', [poolId]);
-						result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-						const feePercent = poolManagerIface.decodeFunctionResult('getPoolPlatformFeePercentage', result);
+						const feePercent = await queryContract(env, poolManagerId, poolManagerIface, 'getPoolPlatformFeePercentage', [ownedPoolId], operatorId);
 
 						const totalProceeds = proceeds[0];
 						const withdrawn = proceeds[1];
@@ -442,7 +381,7 @@ async function getUserState() {
 
 						totalWithdrawable += BigInt(ownerShare);
 
-						console.log(`  Pool #${poolId}:`);
+						console.log(`  Pool #${ownedPoolId}:`);
 						console.log(`    - Available:      ${new Hbar(available, HbarUnit.Tinybar).toString()}`);
 						console.log(`    - Your Share:     ${new Hbar(ownerShare, HbarUnit.Tinybar).toString()} (${100 - Number(feePercent[0])}%)`);
 					}

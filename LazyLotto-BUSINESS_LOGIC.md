@@ -1,8 +1,8 @@
 # LazyLotto - Business Logic & Use Cases Documentation
 
-**Last Updated**: November 12, 2025
-**Contract Version**: LazyLotto v2 (Split Pattern with LazyLottoStorage)
-**Contract Sizes**: LazyLotto 23.612 KB | LazyLottoStorage 11.137 KB
+**Last Updated**: March 2026
+**Contract Version**: LazyLotto v3 (Three-Contract Architecture: LazyLotto + LazyLottoPoolManager + LazyLottoStorage)
+**Contract Sizes**: LazyLotto 23.782 KB | LazyLottoPoolManager ~8 KB | LazyLottoStorage 11.137 KB
 
 ## Overview
 
@@ -10,7 +10,21 @@ LazyLotto is a decentralized lottery system built on the Hedera network that all
 
 ## Core Concepts
 
+### Contract Architecture
+
+LazyLotto operates as a three-contract system, each with distinct responsibilities:
+
+- **LazyLotto**: Core business logic, user interactions, and game mechanics. Acts as the primary entry point for all operations (buying tickets, rolling, claiming prizes, pool creation). Delegates authorization checks to PoolManager and token operations to Storage.
+
+- **LazyLottoPoolManager**: Pool ownership, community pool creation and fees, bonus/boost system, proceeds tracking, platform fee management, and prize manager authorization. Manages the distinction between global (admin-created) and community (user-created) pools. All bonus configuration functions (`setTimeBonus`, `setNFTBonus`, `setLazyBalanceBonus`) live here.
+
+- **LazyLottoStorage**: Handles all HTS (Hedera Token Service) token operations. Holds all non-LAZY prize tokens (HBAR, fungible tokens, NFTs) as treasury. Access-controlled so only LazyLotto can call its methods. Users approve non-LAZY token/NFT spending to the Storage address. $LAZY approvals always go to LazyGasStation (which handles burn logic).
+
+This separation keeps LazyLotto under Hedera's 24 KB contract size limit while enabling community pool ownership and a rich bonus system via PoolManager.
+
 ### 1. Lottery Pools
+Pools can be either **Global** (admin-created, team-managed) or **Community** (user-created via PoolManager). Both pool types share the same game mechanics, prize system, and ticket infrastructure. The key differences are in creation cost, ownership, and proceeds distribution (see "Pool Management" below).
+
 Each lottery pool represents an independent lottery with its own:
 - **Entry Fee**: Cost to purchase a ticket (in specified token)
 - **Win Rate**: Probability of winning (expressed in ten-thousandths of basis points)
@@ -38,6 +52,14 @@ Users can receive win rate bonuses through:
 - **Time-Based Bonuses**: Active during specific time windows
 - **NFT Holding Bonuses**: For holding specific NFT collections
 - **$LAZY Balance Bonuses**: For maintaining minimum $LAZY holdings
+
+Bonus configuration functions live on **LazyLottoPoolManager**, not LazyLotto directly:
+- `PoolManager.setTimeBonus(startTime, endTime, bps)` - Configure time-based bonus windows
+- `PoolManager.setNFTBonus(tokenAddress, bps)` - Configure NFT holding bonuses
+- `PoolManager.setLazyBalanceBonus(threshold, bps)` - Configure $LAZY balance bonuses
+- `PoolManager.calculateBoost(user)` - Calculate total boost for a user
+
+LazyLotto exposes `calculateBoost(user)` as a facade that delegates to PoolManager, maintaining backward compatibility for existing integrations.
 
 ## Primary Use Cases
 
@@ -71,37 +93,94 @@ Users can receive win rate bonuses through:
 5. Contract burns the NFT tickets and processes rolls
 6. Prizes are awarded as normal
 
-### 3. Administrative Pool Management
+### 3. Pool Management
 
-**User Story**: "As an admin, I want to create and manage lottery pools"
+**User Story**: "As an admin or community member, I want to create and manage lottery pools"
 
-**Pool Creation Flow**:
+#### Global vs Community Pools
+
+| Aspect | Global Pools | Community Pools |
+|--------|-------------|-----------------|
+| **Created by** | LazyLotto admins | Any user via `createPool()` |
+| **Creation fee** | None | HBAR + $LAZY fee (set by admins) |
+| **Owner** | No individual owner (`address(0)`) | Creator's address |
+| **Proceeds** | All proceeds go to platform | Owner gets proceeds minus platform fee % |
+| **Platform fee %** | 0% (not applicable) | Locked at creation time (default 5%, max 25%) |
+| **Prize management** | Admins and global prize managers | Pool owner, per-pool prize manager, admins, global prize managers |
+| **Pool management** | Admins only | Pool owner or admins |
+| **Ownership transfer** | Not transferable | Transferable via `PoolManager.transferPoolOwnership()` |
+
+#### Pool Creation Flow
+
+**Admin-Created (Global) Pools**:
 1. Admin calls `createPool()` with parameters:
    - Pool metadata (name, symbol, artwork CIDs)
    - Win rate and entry fee
    - Fee token specification
    - **Forwards msg.value** to cover HTS token creation costs
 2. Contract creates new HTS NFT collection for tickets via `storageContract.createToken{value: msg.value}()`
-3. Admin OR Prize Manager adds prizes using:
-   - `addPrizePackage()` - Single package (HBAR/FT/NFT)
-   - `addMultipleFungiblePrizes()` - Batch fungible prizes
-4. Pool becomes available for user participation
+3. PoolManager records pool as global (owner = `address(0)`, platform fee = 0%)
+4. Admin or global prize manager adds prizes
 
-**Pool Management**:
-- `pausePool()` / `unpausePool()`: Control ticket sales
+**User-Created (Community) Pools**:
+1. User calls `createPool()` with same parameters as above
+2. Contract validates and collects creation fees:
+   - HBAR fee forwarded to PoolManager
+   - $LAZY fee burned via LazyGasStation
+   - Fee amounts queryable via `PoolManager.getCreationFees()`
+3. PoolManager records pool as community:
+   - Sets `poolOwners[poolId] = creator`
+   - Captures current `platformProceedsPercentage` (locked for this pool)
+   - Adds to `communityPools` array and `userOwnedPools[creator]`
+4. Pool owner or their designated prize manager adds prizes
+5. Pool becomes available for user participation
+
+**Pool Lifecycle Management**:
+- `pausePool()` / `unpausePool()`: Control ticket sales (pool owner or admin)
 - `closePool()`: Permanently disable pool (requires no outstanding entries)
-- `removePrizes()`: Recover prizes from closed pools (admin-only)
+- `removePrizes()`: Recover prizes from closed pools
 
-**Prize Manager Role** (NEW):
-Enables partnerships without granting full admin privileges:
-- `addPrizeManager(address)` - Admin grants prize addition rights
-- `removePrizeManager(address)` - Admin revokes rights
-- `isPrizeManager(address)` - Check role status
-- Prize managers can ONLY add prizes, not manage pools or settings
-- Prevents reputation risk from dubious/scam token prizes
-- Revocable at any time by admin
+#### Community Pool Creation
 
-**NFT Bonus Deduplication** (NEW):
+Any user can create a community pool by paying the required creation fees:
+- **Query fees**: `PoolManager.getCreationFees()` returns `(hbarFee, lazyFee)`
+- **HBAR fee**: Sent as msg.value (collected by PoolManager)
+- **$LAZY fee**: Burned from user's balance via LazyGasStation
+- **Admin fee setting**: `PoolManager.setCreationFees(hbarFee, lazyFee)` (admin-only)
+- **Proceeds**: Pool owner receives entry fee proceeds minus the platform fee percentage
+- **Platform fee lock-in**: The platform fee percentage active at pool creation time is permanently locked for that pool via `poolPlatformFeePercentage[poolId]`
+
+#### Pool Ownership
+
+Community pool owners have management rights over their pools:
+- **Query owner**: `PoolManager.getPoolOwner(poolId)` - returns owner address (`address(0)` for global pools)
+- **Transfer ownership**: `PoolManager.transferPoolOwnership(poolId, newOwner)` - callable by current owner or admin
+- **Delegate prize management**: `PoolManager.setPoolPrizeManager(poolId, manager)` - allows a third party to add prizes without full pool management rights
+- **Query user's pools**: `PoolManager.getUserPools(userAddress)` - returns all pool IDs owned by a user
+- **Withdraw proceeds**: Owner can withdraw accumulated entry fee proceeds (minus platform cut) via `LazyLotto.withdrawPoolProceeds(poolId, token)`
+
+#### Prize Manager Role
+
+Enables partnerships and delegated prize management without granting full admin or pool management privileges:
+
+**Global Prize Managers** (admin-managed, can add prizes to any pool):
+- `PoolManager.addGlobalPrizeManager(address)` - Admin grants global prize addition rights
+- `PoolManager.removeGlobalPrizeManager(address)` - Admin revokes rights
+- `PoolManager.isGlobalPrizeManager(address)` - Check role status
+
+**Per-Pool Prize Managers** (pool-owner-managed, can add prizes to a specific pool):
+- `PoolManager.setPoolPrizeManager(poolId, manager)` - Pool owner or admin delegates prize management for one pool
+- `PoolManager.getPoolPrizeManager(poolId)` - Query current prize manager
+
+**Authorization hierarchy for adding prizes** (checked by `PoolManager.canAddPrizes()`):
+1. LazyLotto admins - can add to any pool
+2. Global prize managers - can add to any pool
+3. Pool owner - can add to their own pool
+4. Per-pool prize manager - can add to their assigned pool only
+
+Prize managers can ONLY add prizes, not manage pools or settings. Rights are revocable at any time.
+
+**NFT Bonus Deduplication**:
 When setting NFT bonuses, system prevents duplicate entries:
 - `setNFTBonus(token, bps)` checks if token already exists in `nftBonusTokens` array
 - If found, updates bonus amount without adding duplicate
@@ -207,10 +286,10 @@ Base Win Rate: 1000 (10.00%)
 
 **Real-Time Evaluation**: Boost calculations are performed dynamically at the time of rolling, ensuring users always benefit from their current holdings and active time windows without needing to "refresh" their boost status.
 
-**Bonus Configuration**:
-- **Time Bonuses**: Set with `setTimeBonus(startTime, endTime, bps)` - up to 10,000 bps (100% bonus)
-- **NFT Bonuses**: Set with `setNFTBonus(tokenAddress, bps)` - verified via real-time balance check
-- **LAZY Bonuses**: Set with `setLazyBalanceBonus(threshold, bps)` - checked against current $LAZY balance
+**Bonus Configuration** (all configured on PoolManager by admins):
+- **Time Bonuses**: Set with `PoolManager.setTimeBonus(startTime, endTime, bps)` - up to 10,000 bps (100% bonus), max 10 windows
+- **NFT Bonuses**: Set with `PoolManager.setNFTBonus(tokenAddress, bps)` - verified via real-time balance check, max 25 tokens, deduplication built in
+- **LAZY Bonuses**: Set with `PoolManager.setLazyBalanceBonus(threshold, bps)` - checked against current $LAZY balance
 
 This stacking system enables sophisticated player strategies where users can optimize their timing, token holdings, and NFT collections to maximize their winning potential.
 
@@ -243,23 +322,34 @@ The contract includes automatic resource management through the `refill` modifie
 
 ### 1. External Dependencies
 
+**LazyLottoPoolManager**: Manages pool ownership, community pool creation/fees, bonus system, proceeds tracking, and prize manager authorization
 **LazyGasStation**: Provides automatic HBAR refilling and manages $LAZY burns
 **LazyDelegateRegistry**: Handles delegation and permission management
 **PrngSystemContract**: Provides verifiable random numbers for fair gameplay
 **LazyLottoStorage**: Isolated storage contract handling all HTS token operations (transfers, burns, associations)
 
-### 2. Storage Pattern Architecture
+### 2. Three-Contract Architecture
 
-**LazyLotto** and **LazyLottoStorage** implement a split-contract architecture to stay within Hedera's 24 KB contract size limit while maintaining full functionality:
+**LazyLotto**, **LazyLottoPoolManager**, and **LazyLottoStorage** implement a three-contract architecture to stay within Hedera's 24 KB contract size limit while enabling community pool ownership and a rich bonus system:
 
-**LazyLotto (22.939 KB)**:
-- Pure business logic (pools, tickets, prizes, gameplay)
-- References `storageContract` (set once in constructor, immutable)
-- Delegates all token operations to storage
+**LazyLotto (23.782 KB)**:
+- Core business logic (pools, tickets, prizes, gameplay)
+- References `storageContract` and `poolManager` (set once, immutable after linking)
+- Delegates all token operations to Storage
+- Delegates authorization checks, proceeds tracking, and boost calculations to PoolManager
 - Maintains accounting state (`ftTokensForPrizes` mapping)
-- **Acts as the sole interface for all operations** - users and admins interact only with LazyLotto
+- **Acts as the primary interface for most operations** - users interact with LazyLotto for buying, rolling, claiming
 
-**LazyLottoStorage (11.218 KB)**:
+**LazyLottoPoolManager (~8 KB)**:
+- Pool ownership and community pool registration
+- Creation fee collection and configuration
+- Proceeds tracking and withdrawal split (owner share vs platform cut)
+- Bonus/boost system (time bonuses, NFT bonuses, $LAZY balance bonuses)
+- Global and per-pool prize manager authorization
+- Pool enumeration (global pools vs community pools, paginated)
+- Platform fee percentage management (locked per-pool at creation time)
+
+**LazyLottoStorage (11.137 KB)**:
 - All HTS token operations (transfers, associations, burns, minting)
 - Holds all prize tokens (HBAR, FT, NFT) as treasury
 - Access controlled via `onlyContractUser` modifier (only LazyLotto can call)
@@ -268,9 +358,12 @@ The contract includes automatic resource management through the `refill` modifie
 
 **Deployment Flow**:
 1. Deploy LazyLottoStorage with (lazyGasStation, lazyToken) - LAZY token auto-associated in constructor
-2. Deploy LazyLotto with storage address and other dependencies
-3. Call `storage.setContractUser(lazyLotto.address)` - locks permanently (one-time only)
-4. Users approve tokens to storage address (query via `lazyLotto.storageContract()`)
+2. Deploy LazyLottoPoolManager with (lazyToken, lazyGasStation, lazyDelegateRegistry)
+3. Deploy LazyLotto with storage address and other dependencies
+4. Call `storage.setContractUser(lazyLotto.address)` - locks permanently (one-time only)
+5. Call `poolManager.setLazyLotto(lazyLotto.address)` - locks permanently (one-time only)
+6. Call `lazyLotto.setPoolManager(poolManager.address)` - locks permanently (one-time only)
+7. Users approve tokens to storage address (query via `lazyLotto.storageContract()`)
 
 **Token Flow Architecture**:
 ```
@@ -336,8 +429,10 @@ All admin withdrawals must go through LazyLotto's facade methods to ensure prize
 
 ### 1. Revenue Streams
 - Entry fees collected in various tokens
+- Community pool creation fees (HBAR + $LAZY)
+- Platform fee percentage on community pool proceeds (default 5%, max 25%)
 - Burn mechanics on $LAZY transactions
-- Prize funding from administrators
+- Prize funding from administrators and community pool owners
 
 ### 2. Cost Management
 - Automatic gas refilling
@@ -370,5 +465,12 @@ All admin withdrawals must go through LazyLotto's facade methods to ensure prize
 - Focus on specific prize types
 - Use boost system strategically
 - Manage prize portfolio through NFT system
+
+### 5. Community Pool Creator
+- Create custom lottery pools by paying creation fees
+- Configure prizes and manage pool lifecycle
+- Earn proceeds from entry fees (minus platform fee %)
+- Delegate prize management to partners via per-pool prize managers
+- Transfer pool ownership when needed
 
 This business logic framework provides the foundation for comprehensive testing and ensures all stakeholders understand the system's capabilities and intended usage patterns.

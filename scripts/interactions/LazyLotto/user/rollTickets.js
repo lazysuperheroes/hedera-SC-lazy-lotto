@@ -12,37 +12,15 @@
  * Usage: node scripts/interactions/LazyLotto/user/rollTickets.js [poolId] [quantity] [nftSerial]
  */
 
-const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
-} = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
 require('dotenv').config();
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
 
 // Helper: Convert Hedera ID to EVM address
 async function convertToHederaId(evmAddress) {
@@ -77,24 +55,8 @@ async function rollTickets() {
 			process.exit(1);
 		}
 
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║              LazyLotto Roll Tickets                       ║');
@@ -104,22 +66,17 @@ async function rollTickets() {
 		console.log(`🎰 Pool: #${poolId}\n`);
 
 		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
+		const lazyLottoIface = loadInterface('LazyLotto');
 
 		// Import helpers
-		const { readOnlyEVMFromMirrorNode, contractExecuteFunction } = require('../../../../utils/solidityHelpers');
+		const { contractExecuteFunction } = require('../../../../utils/solidityHelpers');
 		const { estimateGas } = require('../../../../utils/gasHelpers');
 
 		console.log('🔍 Checking your entries...\n');
 
 		// Get user's entries
 		const userEvmAddress = '0x' + operatorId.toSolidityAddress();
-		let encodedCommand = lazyLottoIface.encodeFunctionData('getUsersEntries', [poolId, userEvmAddress]);
-		let result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const entries = lazyLottoIface.decodeFunctionResult('getUsersEntries', result);
+		const entries = await queryContract(env, contractId, lazyLottoIface, 'getUsersEntries', [poolId, userEvmAddress], operatorId);
 
 		const totalEntries = Number(entries[0]);
 
@@ -131,16 +88,12 @@ async function rollTickets() {
 		console.log(`✅ You have ${totalEntries} entries in pool #${poolId}\n`);
 
 		// Get pool details
-		encodedCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [poolId]);
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
 		// eslint-disable-next-line no-unused-vars
-		const [ticketCID, winCID, winRate, entryFee, newPrizeCount, outstanding, , paused, closed, feeToken] =
-			lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', result);
+		const [ticketCID, winCID, winRate, entryFee, newPrizeCount, outstanding, poolTokenAddress, paused, closed, feeToken] =
+			await queryContract(env, contractId, lazyLottoIface, 'getPoolBasicInfo', [poolId], operatorId);
 
 		// Get user's boost
-		encodedCommand = lazyLottoIface.encodeFunctionData('calculateBoost', [userEvmAddress]);
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const boostBps = lazyLottoIface.decodeFunctionResult('calculateBoost', result);
+		const boostBps = await queryContract(env, contractId, lazyLottoIface, 'calculateBoost', [userEvmAddress], operatorId);
 
 		const baseWinRate = Number(winRate);
 		const boostedWinRate = baseWinRate + Number(boostBps[0]);
@@ -187,16 +140,16 @@ async function rollTickets() {
 			}
 
 			// Verify ownership
-			const poolTokenId = await convertToHederaId(poolTokenId);
+			const poolTokenHederaId = await convertToHederaId(poolTokenAddress);
 			const { getSerialsOwned } = require('../../../../utils/hederaMirrorHelpers');
-			const ownedSerials = await getSerialsOwned(env, operatorId.toString(), poolTokenId);
+			const ownedSerials = await getSerialsOwned(env, operatorId.toString(), poolTokenHederaId);
 
 			if (!ownedSerials.includes(nftSerial)) {
-				console.error(`❌ You don't own serial #${nftSerial} of ${poolTokenId}`);
+				console.error(`❌ You don't own serial #${nftSerial} of ${poolTokenHederaId}`);
 				process.exit(1);
 			}
 
-			console.log(`🎫 Using NFT boost: ${poolTokenId} serial #${nftSerial}\n`);
+			console.log(`🎫 Using NFT boost: ${poolTokenHederaId} serial #${nftSerial}\n`);
 		}
 
 		console.log('═══════════════════════════════════════════════════════════');
@@ -217,7 +170,7 @@ async function rollTickets() {
 
 		if (nftSerial !== null) {
 			functionName = 'rollWithNFT';
-			functionArgs = [poolId, quantity, nftSerial];
+			functionArgs = [poolId, [nftSerial]];
 		}
 		else if (rollAll) {
 			functionName = 'rollAll';
@@ -234,8 +187,8 @@ async function rollTickets() {
 		console.log(`   With 2x multiplier: ${gasEstimate} gas\n`);
 
 		// Confirm roll
-		const confirm = await prompt('Proceed with rolling? (yes/no): ');
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt('Proceed with rolling? (yes/no): ');
+		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Roll cancelled');
 			process.exit(0);
 		}
@@ -285,14 +238,11 @@ async function rollTickets() {
 		await new Promise(resolve => setTimeout(resolve, 5000));
 
 		// Get updated state
-		encodedCommand = lazyLottoIface.encodeFunctionData('getUsersEntries', [poolId, userEvmAddress]);
-		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
-		const newEntries = lazyLottoIface.decodeFunctionResult('getUsersEntries', result);
+		const newEntries = await queryContract(env, contractId, lazyLottoIface, 'getUsersEntries', [poolId, userEvmAddress], operatorId);
 
 		// Get updated pending prizes count
-		const countQuery = lazyLottoIface.encodeFunctionData('getPendingPrizesCount', [userEvmAddress]);
-		const countResult = await readOnlyEVMFromMirrorNode(env, contractId, countQuery, operatorId, false);
-		const prizeCount = lazyLottoIface.decodeFunctionResult('getPendingPrizesCount', countResult)[0];
+		const prizeCountResult = await queryContract(env, contractId, lazyLottoIface, 'getPendingPrizesCount', [userEvmAddress], operatorId);
+		const prizeCount = prizeCountResult[0];
 
 		console.log('═══════════════════════════════════════════════════════════');
 		console.log('  UPDATED STATE');

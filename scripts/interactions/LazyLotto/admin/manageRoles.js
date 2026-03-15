@@ -18,43 +18,22 @@
  *   --signers=Alice,Bob,Charlie     Label signers for clarity
  */
 
-const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
-} = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
 require('dotenv').config();
-
+const { AccountId, ContractId } = require('@hashgraph/sdk');
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
 	displayMultiSigBanner,
 } = require('../../../../utils/scriptHelpers');
+const { homebrewPopulateAccountNum, EntityType } = require('../../../../utils/hederaMirrorHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const contractId = ContractId.fromString(process.env.LAZY_LOTTO_CONTRACT_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
 
 async function manageRoles() {
 	// Check for multi-sig help request
@@ -65,24 +44,8 @@ async function manageRoles() {
 	let client;
 
 	try {
-		// Normalize environment name to accept TEST/TESTNET, MAIN/MAINNET, PREVIEW/PREVIEWNET
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║            LazyLotto Manage Roles (Admin)                 ║');
@@ -93,43 +56,61 @@ async function manageRoles() {
 		// Display multi-sig status if enabled
 		displayMultiSigBanner();
 
-		// Load contract ABI
-		const contractJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-		);
-		const lazyLottoIface = new ethers.Interface(contractJson.abi);
+		// Load LazyLotto ABI (admin operations)
+		const lazyLottoIface = loadInterface('LazyLotto');
+
+		// Load PoolManager ABI (prize manager operations)
+		const poolManagerIface = loadInterface('LazyLottoPoolManager');
+
+		// Resolve PoolManager address from LazyLotto
+		const pmResult = await queryContract(env, contractId, lazyLottoIface, 'poolManager', [], operatorId);
+		const poolManagerAddr = pmResult[0];
+		const poolManagerHederaId = await homebrewPopulateAccountNum(env, poolManagerAddr, EntityType.CONTRACT);
+		const poolManagerId = ContractId.fromString(poolManagerHederaId);
 
 		// Menu
 		console.log('Select action:');
-		console.log('1. Add Admin');
-		console.log('2. Remove Admin');
-		console.log('3. Add Prize Manager');
-		console.log('4. Remove Prize Manager');
+		console.log('1. Add Admin (on LazyLotto)');
+		console.log('2. Remove Admin (on LazyLotto)');
+		console.log('3. Add Global Prize Manager (on PoolManager)');
+		console.log('4. Remove Global Prize Manager (on PoolManager)');
 
 		const choice = await prompt('\nEnter choice (1-4): ');
 
-		let operation, functionName;
+		let operation, functionName, targetContractId, targetIface, roleType;
 
 		switch (choice) {
 		case '1':
 			operation = 'add';
 			functionName = 'addAdmin';
+			targetContractId = contractId;
+			targetIface = lazyLottoIface;
+			roleType = 'Admin';
 			console.log('\n➕ Add Admin\n');
 			break;
 		case '2':
 			operation = 'remove';
 			functionName = 'removeAdmin';
+			targetContractId = contractId;
+			targetIface = lazyLottoIface;
+			roleType = 'Admin';
 			console.log('\n➖ Remove Admin\n');
 			break;
 		case '3':
 			operation = 'add';
-			functionName = 'addPrizeManager';
-			console.log('\n➕ Add Prize Manager\n');
+			functionName = 'addGlobalPrizeManager';
+			targetContractId = poolManagerId;
+			targetIface = poolManagerIface;
+			roleType = 'Global Prize Manager';
+			console.log('\n➕ Add Global Prize Manager\n');
 			break;
 		case '4':
 			operation = 'remove';
-			functionName = 'removePrizeManager';
-			console.log('\n➖ Remove Prize Manager\n');
+			functionName = 'removeGlobalPrizeManager';
+			targetContractId = poolManagerId;
+			targetIface = poolManagerIface;
+			roleType = 'Global Prize Manager';
+			console.log('\n➖ Remove Global Prize Manager\n');
 			break;
 		default:
 			console.error('❌ Invalid choice');
@@ -157,11 +138,11 @@ async function manageRoles() {
 		}
 
 		console.log(`\nTarget address: ${targetAddress}`);
+		console.log(`Target contract: ${targetContractId.toString()}`);
 
 		// Confirm
-		const roleType = functionName.includes('Admin') ? 'Admin' : 'Prize Manager';
-		const confirm = await prompt(`${operation === 'add' ? 'Add' : 'Remove'} ${roleType} role ${operation === 'add' ? 'to' : 'from'} ${addressInput}? (yes/no): `);
-		if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+		const confirmAnswer = await prompt(`${operation === 'add' ? 'Add' : 'Remove'} ${roleType} role ${operation === 'add' ? 'to' : 'from'} ${addressInput}? (yes/no): `);
+		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Operation cancelled');
 			process.exit(0);
 		}
@@ -170,8 +151,8 @@ async function manageRoles() {
 		console.log(`\n🔄 ${operation === 'add' ? 'Adding' : 'Removing'} ${roleType.toLowerCase()}...`);
 
 		const executionResult = await executeContractFunction({
-			contractId: contractId,
-			iface: lazyLottoIface,
+			contractId: targetContractId,
+			iface: targetIface,
 			client: client,
 			functionName: functionName,
 			params: [targetAddress],

@@ -21,18 +21,12 @@
  *   --signers=Alice,Bob,Charlie     Label signers for clarity
  */
 
-const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
-} = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
 require('dotenv').config();
-
-const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
+const { AccountId } = require('@hashgraph/sdk');
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
@@ -40,24 +34,8 @@ const {
 } = require('../../../../utils/scriptHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const poolManagerId = ContractId.fromString(process.env.LAZY_LOTTO_POOL_MANAGER_ID);
-
-function promptForInput(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise((resolve) => {
-		rl.question(question, (answer) => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const poolManagerId = getContractId('LAZY_LOTTO_POOL_MANAGER_ID');
 
 async function convertToEvmAddress(accountId) {
 	// Convert Hedera account ID to EVM address format
@@ -76,24 +54,8 @@ async function manageGlobalPrizeManagers() {
 	let client;
 
 	try {
-		// Normalize environment name
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║        Manage Global Prize Managers (Admin)               ║');
@@ -106,12 +68,7 @@ async function manageGlobalPrizeManagers() {
 		displayMultiSigBanner();
 
 		// Load interface
-		const poolManagerJson = JSON.parse(
-			fs.readFileSync(
-				'./artifacts/contracts/LazyLottoPoolManager.sol/LazyLottoPoolManager.json',
-			),
-		);
-		const poolManagerIface = new ethers.Interface(poolManagerJson.abi);
+		const poolManagerIface = loadInterface('LazyLottoPoolManager');
 
 		// Show menu
 		console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -122,35 +79,29 @@ async function manageGlobalPrizeManagers() {
 		console.log('   3. Remove a global prize manager');
 		console.log('   4. Check if account is a global prize manager\n');
 
-		const choice = await promptForInput('Select option (1-4): ');
+		const choice = await prompt('Select option (1-4): ');
 
 		if (choice === '1') {
-			// View all
+			// View count (no enumeration function exists on-chain)
 			console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 			console.log('📋 Global Prize Managers');
 			console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-			const encodedCommand = poolManagerIface.encodeFunctionData('getGlobalPrizeManagers', [0, 100]);
-			const result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-			const managers = poolManagerIface.decodeFunctionResult('getGlobalPrizeManagers', result);
+			const countResult = await queryContract(env, poolManagerId, poolManagerIface, 'getGlobalPrizeManagerCount', [], operatorId);
+			const count = countResult[0];
 
-			if (managers[0].length === 0) {
+			console.log(`   Total global prize managers: ${Number(count)}\n`);
+			if (Number(count) === 0) {
 				console.log('   No global prize managers configured.\n');
 			}
 			else {
-				console.log(`   Total: ${managers[0].length}\n`);
-				for (let i = 0; i < managers[0].length; i++) {
-					// Convert EVM address to Hedera ID
-					const evmAddress = managers[0][i];
-					// Simple conversion for display (may need mirror node lookup for full conversion)
-					console.log(`   ${i + 1}. ${evmAddress}`);
-				}
-				console.log('');
+				console.log('   Note: The contract does not provide an enumeration function.');
+				console.log('   Use option 4 to check if a specific account is a global prize manager.\n');
 			}
 		}
 		else if (choice === '2') {
 			// Add
-			const accountInput = await promptForInput('\nEnter account ID to add (e.g., 0.0.12345): ');
+			const accountInput = await prompt('\nEnter account ID to add (e.g., 0.0.12345): ');
 
 			let accountId;
 			try {
@@ -164,17 +115,15 @@ async function manageGlobalPrizeManagers() {
 			const evmAddress = await convertToEvmAddress(accountId.toString());
 
 			// Check if already a manager
-			const checkCommand = poolManagerIface.encodeFunctionData('isGlobalPrizeManager', [evmAddress]);
-			const checkResult = await readOnlyEVMFromMirrorNode(env, poolManagerId, checkCommand, operatorId, false);
-			const isManager = poolManagerIface.decodeFunctionResult('isGlobalPrizeManager', checkResult);
+			const isManager = await queryContract(env, poolManagerId, poolManagerIface, 'isGlobalPrizeManager', [evmAddress], operatorId);
 
 			if (isManager[0]) {
 				console.log(`\n⚠️  ${accountId.toString()} is already a global prize manager.\n`);
 				return;
 			}
 
-			const confirm = await promptForInput(`\n❓ Confirm adding ${accountId.toString()} as global prize manager? (yes/no): `);
-			if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+			const confirmAnswer = await prompt(`\n❓ Confirm adding ${accountId.toString()} as global prize manager? (yes/no): `);
+			if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 				console.log('\n❌ Operation cancelled.\n');
 				return;
 			}
@@ -205,7 +154,7 @@ async function manageGlobalPrizeManagers() {
 		}
 		else if (choice === '3') {
 			// Remove
-			const accountInput = await promptForInput('\nEnter account ID to remove (e.g., 0.0.12345): ');
+			const accountInput = await prompt('\nEnter account ID to remove (e.g., 0.0.12345): ');
 
 			let accountId;
 			try {
@@ -219,17 +168,15 @@ async function manageGlobalPrizeManagers() {
 			const evmAddress = await convertToEvmAddress(accountId.toString());
 
 			// Check if is a manager
-			const checkCommand = poolManagerIface.encodeFunctionData('isGlobalPrizeManager', [evmAddress]);
-			const checkResult = await readOnlyEVMFromMirrorNode(env, poolManagerId, checkCommand, operatorId, false);
-			const isManager = poolManagerIface.decodeFunctionResult('isGlobalPrizeManager', checkResult);
+			const isManager = await queryContract(env, poolManagerId, poolManagerIface, 'isGlobalPrizeManager', [evmAddress], operatorId);
 
 			if (!isManager[0]) {
 				console.log(`\n⚠️  ${accountId.toString()} is not a global prize manager.\n`);
 				return;
 			}
 
-			const confirm = await promptForInput(`\n❓ Confirm removing ${accountId.toString()} as global prize manager? (yes/no): `);
-			if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+			const confirmAnswer = await prompt(`\n❓ Confirm removing ${accountId.toString()} as global prize manager? (yes/no): `);
+			if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 				console.log('\n❌ Operation cancelled.\n');
 				return;
 			}
@@ -260,7 +207,7 @@ async function manageGlobalPrizeManagers() {
 		}
 		else if (choice === '4') {
 			// Check
-			const accountInput = await promptForInput('\nEnter account ID to check (e.g., 0.0.12345): ');
+			const accountInput = await prompt('\nEnter account ID to check (e.g., 0.0.12345): ');
 
 			let accountId;
 			try {
@@ -273,9 +220,7 @@ async function manageGlobalPrizeManagers() {
 
 			const evmAddress = await convertToEvmAddress(accountId.toString());
 
-			const checkCommand = poolManagerIface.encodeFunctionData('isGlobalPrizeManager', [evmAddress]);
-			const checkResult = await readOnlyEVMFromMirrorNode(env, poolManagerId, checkCommand, operatorId, false);
-			const isManager = poolManagerIface.decodeFunctionResult('isGlobalPrizeManager', checkResult);
+			const isManager = await queryContract(env, poolManagerId, poolManagerIface, 'isGlobalPrizeManager', [evmAddress], operatorId);
 
 			console.log(`\n${isManager[0] ? '✅' : '❌'} ${accountId.toString()} ${isManager[0] ? 'IS' : 'IS NOT'} a global prize manager.\n`);
 		}

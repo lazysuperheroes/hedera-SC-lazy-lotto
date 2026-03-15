@@ -20,27 +20,25 @@
  * Config file format (JSON):
  * {
  *   "timeBonuses": [
- *     { "threshold": 86400, "multiplier": 110 },
- *     { "threshold": 2592000, "multiplier": 125 }
+ *     { "start": 1700000000, "end": 1700086400, "bonusBps": 110 },
+ *     { "start": 1700086400, "end": 1702592000, "bonusBps": 125 }
  *   ],
  *   "nftBonuses": [
- *     { "address": "0.0.1234", "multiplier": 115 }
+ *     { "address": "0.0.1234", "bonusBps": 115 }
  *   ],
- *   "lazyBalanceBonus": { "threshold": 1000000, "multiplier": 105 }
+ *   "lazyBalanceBonus": { "threshold": 1000000, "bonusBps": 105 }
  * }
  */
 
-const {
-	Client,
-	AccountId,
-	PrivateKey,
-	ContractId,
-} = require('@hashgraph/sdk');
-const { ethers } = require('ethers');
-const fs = require('fs');
-const readline = require('readline');
 require('dotenv').config();
-
+const fs = require('fs');
+const { AccountId, ContractId } = require('@hashgraph/sdk');
+const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
+const { loadInterface } = require('../../../../utils/abiLoader');
+const { prompt } = require('../../../../utils/promptHelpers');
+const { queryContract } = require('../../../../utils/queryHelpers');
+const { homebrewPopulateAccountNum, EntityType } = require('../../../../utils/hederaMirrorHelpers');
+const { estimateGas } = require('../../../../utils/gasHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
@@ -48,25 +46,8 @@ const {
 } = require('../../../../utils/scriptHelpers');
 
 // Environment setup
-const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-const env = process.env.ENVIRONMENT ?? 'testnet';
-const poolManagerId = ContractId.fromString(process.env.LAZY_LOTTO_POOL_MANAGER_ID);
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { operatorId, operatorKey, env } = getEnvConfig();
+const poolManagerId = getContractId('LAZY_LOTTO_POOL_MANAGER_ID');
 
 // Helper: Sleep
 function sleep(ms) {
@@ -74,26 +55,24 @@ function sleep(ms) {
 }
 
 // Default bonus configuration (example values)
+// setTimeBonus(uint256 start, uint256 end, uint16 bonusBps)
+// setNFTBonus(address token, uint16 bonusBps)
+// setLazyBalanceBonus(uint256 threshold, uint16 bonusBps)
 const DEFAULT_CONFIG = {
 	timeBonuses: [
-		// 1 day: 10% bonus
-		{ threshold: 86400, multiplier: 110 },
-		// 7 days: 15% bonus
-		{ threshold: 604800, multiplier: 115 },
-		// 30 days: 25% bonus
-		{ threshold: 2592000, multiplier: 125 },
-		// 90 days: 50% bonus
-		{ threshold: 7776000, multiplier: 150 },
+		// Example time windows (Unix timestamps) with bonus BPS
+		// { start: 1700000000, end: 1700086400, bonusBps: 110 },
+		// Add time bonus windows here
 	],
 	nftBonuses: [
-		// Example: { address: "0.0.1234", multiplier: 115 }
-		// Add NFT collection IDs and their bonus multipliers here
+		// Example: { address: "0.0.1234", bonusBps: 115 }
+		// Add NFT collection IDs and their bonus BPS here
 	],
 	lazyBalanceBonus: {
 		// 1M LAZY tokens (adjust for decimals)
 		threshold: 1000000,
-		// 5% bonus
-		multiplier: 105,
+		// 5% bonus (in BPS: 500 = 5%)
+		bonusBps: 500,
 	},
 };
 
@@ -117,24 +96,8 @@ async function migrateBonuses() {
 			}
 		}
 
-		// Normalize environment name
-		const envUpper = env.toUpperCase();
-
 		// Initialize client
-		if (envUpper === 'MAINNET' || envUpper === 'MAIN') {
-			client = Client.forMainnet();
-		}
-		else if (envUpper === 'TESTNET' || envUpper === 'TEST') {
-			client = Client.forTestnet();
-		}
-		else if (envUpper === 'PREVIEWNET' || envUpper === 'PREVIEW') {
-			client = Client.forPreviewnet();
-		}
-		else {
-			throw new Error(`Unknown environment: ${env}. Use TESTNET, MAINNET, or PREVIEWNET`);
-		}
-
-		client.setOperator(operatorId, operatorKey);
+		client = createClient(env, operatorId, operatorKey);
 
 		console.log('\n╔════════════════════════════════════════════════════════════╗');
 		console.log('║         LazyLotto Migrate Bonuses (Admin)                 ║');
@@ -173,28 +136,31 @@ async function migrateBonuses() {
 			process.exit(1);
 		}
 
-		if (!config.lazyBalanceBonus || typeof config.lazyBalanceBonus.threshold !== 'number' || typeof config.lazyBalanceBonus.multiplier !== 'number') {
-			console.error('❌ Invalid config: lazyBalanceBonus must have threshold and multiplier');
+		if (!config.lazyBalanceBonus || typeof config.lazyBalanceBonus.threshold !== 'number' || typeof config.lazyBalanceBonus.bonusBps !== 'number') {
+			console.error('❌ Invalid config: lazyBalanceBonus must have threshold and bonusBps');
 			process.exit(1);
 		}
 
 		// Load PoolManager ABI
-		const poolManagerJson = JSON.parse(
-			fs.readFileSync('./artifacts/contracts/LazyLottoPoolManager.sol/LazyLottoPoolManager.json'),
-		);
-		const poolManagerIface = new ethers.Interface(poolManagerJson.abi);
+		const poolManagerIface = loadInterface('LazyLottoPoolManager');
 
-		const { readOnlyEVMFromMirrorNode } = require('../../../../utils/solidityHelpers');
-		const { estimateGas } = require('../../../../utils/gasHelpers');
+		// Resolve LazyLotto address from PoolManager
+		console.log('🔍 Resolving LazyLotto contract from PoolManager...\n');
+		const lazyLottoAddrResult = await queryContract(env, poolManagerId, poolManagerIface, 'lazyLotto', [], operatorId);
+		const lazyLottoAddr = lazyLottoAddrResult[0];
+		const lazyLottoHederaId = await homebrewPopulateAccountNum(env, lazyLottoAddr, EntityType.CONTRACT);
+		const lazyLottoId = ContractId.fromString(lazyLottoHederaId);
 
-		// Check if operator is admin
+		// Load LazyLotto ABI for isAdmin check
+		const lazyLottoIface = loadInterface('LazyLotto');
+
+		// Check if operator is admin via LazyLotto
 		console.log('🔍 Verifying admin permissions...\n');
-		const encodedCommand = poolManagerIface.encodeFunctionData('isAdmin', [operatorId.toSolidityAddress()]);
-		const result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
-		const isAdmin = poolManagerIface.decodeFunctionResult('isAdmin', result)[0];
+		const isAdminResult = await queryContract(env, lazyLottoId, lazyLottoIface, 'isAdmin', [operatorId.toSolidityAddress()], operatorId);
+		const isAdmin = isAdminResult[0];
 
 		if (!isAdmin) {
-			console.error('❌ You are not an admin of the PoolManager contract');
+			console.error('❌ You are not an admin of the LazyLotto contract');
 			process.exit(1);
 		}
 
@@ -206,16 +172,17 @@ async function migrateBonuses() {
 		console.log('═══════════════════════════════════════════════════════════');
 		console.log(`  Time Bonuses:     ${config.timeBonuses.length} entries`);
 		config.timeBonuses.forEach((bonus, i) => {
-			const days = Math.floor(bonus.threshold / 86400);
-			console.log(`    ${i + 1}. ${days} days → ${bonus.multiplier}% multiplier`);
+			const startDate = new Date(bonus.start * 1000).toISOString();
+			const endDate = new Date(bonus.end * 1000).toISOString();
+			console.log(`    ${i + 1}. ${startDate} - ${endDate} → ${bonus.bonusBps} BPS`);
 		});
 		console.log();
 		console.log(`  NFT Bonuses:      ${config.nftBonuses.length} entries`);
 		config.nftBonuses.forEach((bonus, i) => {
-			console.log(`    ${i + 1}. ${bonus.address} → ${bonus.multiplier}% multiplier`);
+			console.log(`    ${i + 1}. ${bonus.address} → ${bonus.bonusBps} BPS`);
 		});
 		console.log();
-		console.log(`  LAZY Balance:     ${config.lazyBalanceBonus.threshold} threshold → ${config.lazyBalanceBonus.multiplier}% multiplier`);
+		console.log(`  LAZY Balance:     ${config.lazyBalanceBonus.threshold} threshold → ${config.lazyBalanceBonus.bonusBps} BPS`);
 		console.log('═══════════════════════════════════════════════════════════\n');
 
 		const totalOperations = config.timeBonuses.length + config.nftBonuses.length + 1;
@@ -237,7 +204,9 @@ async function migrateBonuses() {
 		for (let i = 0; i < config.timeBonuses.length; i++) {
 			const bonus = config.timeBonuses[i];
 			try {
-				console.log(`  [${i + 1}/${config.timeBonuses.length}] Setting ${Math.floor(bonus.threshold / 86400)} day bonus (${bonus.multiplier}%)...`);
+				const startDate = new Date(bonus.start * 1000).toISOString();
+				const endDate = new Date(bonus.end * 1000).toISOString();
+				console.log(`  [${i + 1}/${config.timeBonuses.length}] Setting time bonus ${startDate} - ${endDate} (${bonus.bonusBps} BPS)...`);
 
 				const gasInfo = await estimateGas(
 					env,
@@ -245,7 +214,7 @@ async function migrateBonuses() {
 					poolManagerIface,
 					operatorId,
 					'setTimeBonus',
-					[bonus.threshold, bonus.multiplier],
+					[bonus.start, bonus.end, bonus.bonusBps],
 					150000,
 				);
 				const gasEstimate = gasInfo.gasLimit;
@@ -257,7 +226,7 @@ async function migrateBonuses() {
 					iface: poolManagerIface,
 					client: client,
 					functionName: 'setTimeBonus',
-					params: [bonus.threshold, bonus.multiplier],
+					params: [bonus.start, bonus.end, bonus.bonusBps],
 					gas: gasToUse,
 					payableAmount: 0,
 				});
@@ -297,7 +266,7 @@ async function migrateBonuses() {
 						nftAddress = bonus.address;
 					}
 
-					console.log(`  [${i + 1}/${config.nftBonuses.length}] Setting NFT ${bonus.address} bonus (${bonus.multiplier}%)...`);
+					console.log(`  [${i + 1}/${config.nftBonuses.length}] Setting NFT ${bonus.address} bonus (${bonus.bonusBps} BPS)...`);
 
 					const gasInfo = await estimateGas(
 						env,
@@ -305,7 +274,7 @@ async function migrateBonuses() {
 						poolManagerIface,
 						operatorId,
 						'setNFTBonus',
-						[nftAddress, bonus.multiplier],
+						[nftAddress, bonus.bonusBps],
 						150000,
 					);
 					const gasEstimate = gasInfo.gasLimit;
@@ -317,7 +286,7 @@ async function migrateBonuses() {
 						iface: poolManagerIface,
 						client: client,
 						functionName: 'setNFTBonus',
-						params: [nftAddress, bonus.multiplier],
+						params: [nftAddress, bonus.bonusBps],
 						gas: gasToUse,
 						payableAmount: 0,
 					});
@@ -345,7 +314,7 @@ async function migrateBonuses() {
 		console.log('💎 Migrating LAZY balance bonus...\n');
 		try {
 			const bonus = config.lazyBalanceBonus;
-			console.log(`  Setting LAZY balance bonus (${bonus.threshold} threshold → ${bonus.multiplier}%)...`);
+			console.log(`  Setting LAZY balance bonus (${bonus.threshold} threshold → ${bonus.bonusBps} BPS)...`);
 
 			const gasInfo = await estimateGas(
 				env,
@@ -353,7 +322,7 @@ async function migrateBonuses() {
 				poolManagerIface,
 				operatorId,
 				'setLazyBalanceBonus',
-				[bonus.threshold, bonus.multiplier],
+				[bonus.threshold, bonus.bonusBps],
 				150000,
 			);
 			const gasEstimate = gasInfo.gasLimit;
@@ -365,7 +334,7 @@ async function migrateBonuses() {
 				iface: poolManagerIface,
 				client: client,
 				functionName: 'setLazyBalanceBonus',
-				params: [bonus.threshold, bonus.multiplier],
+				params: [bonus.threshold, bonus.bonusBps],
 				gas: gasToUse,
 				payableAmount: 0,
 			});

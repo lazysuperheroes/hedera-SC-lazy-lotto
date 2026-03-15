@@ -349,7 +349,9 @@ async function isTokenAssociated(env, accountId, tokenId) {
                            │   User's Tokens      │
                            └──────────────────────┘
 
-Users must approve LazyLottoStorage, NOT LazyLotto!
+$LAZY approvals → LazyGasStation (handles burn logic)
+Other token/NFT approvals → LazyLottoStorage (holds all non-LAZY assets)
+HBAR → no allowance needed (sent as msg.value)
 ```
 
 ### Setting Allowances Correctly
@@ -475,7 +477,7 @@ LAZY_LOTTO_STORAGE=0.0.234568
 
 # Token configuration
 LAZY_TOKEN_ID=0.0.345678
-LAZY_DECIMALS=8
+LAZY_DECIMALS=1
 ```
 
 ### Key Type Detection

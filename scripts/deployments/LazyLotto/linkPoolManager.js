@@ -19,40 +19,18 @@
  */
 
 const {
-	Client,
-	AccountId,
-	PrivateKey,
 	ContractId,
 } = require('@hashgraph/sdk');
-const fs = require('fs');
-const readline = require('readline');
-const { ethers } = require('ethers');
-const { readOnlyEVMFromMirrorNode } = require('../../../utils/solidityHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
 	displayMultiSigBanner,
 } = require('../../../utils/scriptHelpers');
 const { sleep } = require('../../../utils/nodeHelpers');
-
-require('dotenv').config();
-
-const env = process.env.ENVIRONMENT ?? 'test';
-
-// Helper: Prompt user
-function prompt(question) {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
-	return new Promise(resolve => {
-		rl.question(question, answer => {
-			rl.close();
-			resolve(answer);
-		});
-	});
-}
+const { getEnvConfig, createClient } = require('../../../utils/clientFactory');
+const { loadInterface } = require('../../../utils/abiLoader');
+const { queryContract } = require('../../../utils/queryHelpers');
+const { prompt } = require('../../../utils/promptHelpers');
 
 async function main() {
 	// Check for multi-sig help request
@@ -60,35 +38,11 @@ async function main() {
 		process.exit(0);
 	}
 
+	const { operatorId, operatorKey, env } = getEnvConfig();
+	const client = createClient(env, operatorId, operatorKey);
+
 	console.log('\n=== Linking LazyLotto and LazyLottoPoolManager ===\n');
 	console.log('Environment:', env.toUpperCase());
-
-	// Setup client
-	const operatorKey = PrivateKey.fromStringED25519(process.env.PRIVATE_KEY);
-	const operatorId = AccountId.fromString(process.env.ACCOUNT_ID);
-
-	let client;
-	const envUpper = env.toUpperCase();
-
-	if (envUpper === 'TEST' || envUpper === 'TESTNET') {
-		client = Client.forTestnet();
-	}
-	else if (envUpper === 'MAIN' || envUpper === 'MAINNET') {
-		client = Client.forMainnet();
-	}
-	else if (envUpper === 'PREVIEW' || envUpper === 'PREVIEWNET') {
-		client = Client.forPreviewnet();
-	}
-	else if (envUpper === 'LOCAL') {
-		const node = { '127.0.0.1:50211': new AccountId(3) };
-		client = Client.forNetwork(node).setMirrorNetwork('127.0.0.1:5600');
-	}
-	else {
-		console.log('ERROR: Must specify either MAIN/MAINNET, TEST/TESTNET, PREVIEW/PREVIEWNET, or LOCAL as environment');
-		return;
-	}
-
-	client.setOperator(operatorId, operatorKey);
 	console.log('Using Operator:', operatorId.toString());
 
 	// Display multi-sig status if enabled
@@ -115,27 +69,14 @@ async function main() {
 	}
 
 	// Load interfaces
-	const lazyLottoJson = JSON.parse(
-		fs.readFileSync('./artifacts/contracts/LazyLotto.sol/LazyLotto.json'),
-	);
-	const lazyLottoIface = new ethers.Interface(lazyLottoJson.abi);
-
-	const poolManagerJson = JSON.parse(
-		fs.readFileSync('./artifacts/contracts/LazyLottoPoolManager.sol/LazyLottoPoolManager.json'),
-	);
-	const poolManagerIface = new ethers.Interface(poolManagerJson.abi);
+	const lazyLottoIface = loadInterface('LazyLotto');
+	const poolManagerIface = loadInterface('LazyLottoPoolManager');
 
 	// Step 1: Set LazyLotto address in PoolManager
 	console.log('\n1. Setting LazyLotto address in PoolManager...');
 
-	const currentLazyLotto = await readOnlyEVMFromMirrorNode(
-		env,
-		poolManagerId,
-		poolManagerIface,
-		'lazyLotto',
-		[],
-		'address',
-	);
+	const currentLazyLottoResult = await queryContract(env, poolManagerId, poolManagerIface, 'lazyLotto', [], operatorId);
+	const currentLazyLotto = currentLazyLottoResult[0];
 
 	if (currentLazyLotto === '0x0000000000000000000000000000000000000000') {
 		const setLazyLottoResult = await executeContractFunction({
@@ -165,14 +106,8 @@ async function main() {
 	// Step 2: Set PoolManager address in LazyLotto
 	console.log('\n2. Setting PoolManager address in LazyLotto...');
 
-	const currentPoolManager = await readOnlyEVMFromMirrorNode(
-		env,
-		lazyLottoId,
-		lazyLottoIface,
-		'poolManager',
-		[],
-		'address',
-	);
+	const currentPoolManagerResult = await queryContract(env, lazyLottoId, lazyLottoIface, 'poolManager', [], operatorId);
+	const currentPoolManager = currentPoolManagerResult[0];
 
 	if (currentPoolManager === '0x0000000000000000000000000000000000000000') {
 		const setPoolManagerResult = await executeContractFunction({
@@ -201,23 +136,11 @@ async function main() {
 
 	// Verify bidirectional linkage
 	console.log('\n3. Verifying linkage...');
-	const verifyLazyLotto = await readOnlyEVMFromMirrorNode(
-		env,
-		poolManagerId,
-		poolManagerIface,
-		'lazyLotto',
-		[],
-		'address',
-	);
+	const verifyLazyLottoResult = await queryContract(env, poolManagerId, poolManagerIface, 'lazyLotto', [], operatorId);
+	const verifyLazyLotto = verifyLazyLottoResult[0];
 
-	const verifyPoolManager = await readOnlyEVMFromMirrorNode(
-		env,
-		lazyLottoId,
-		lazyLottoIface,
-		'poolManager',
-		[],
-		'address',
-	);
+	const verifyPoolManagerResult = await queryContract(env, lazyLottoId, lazyLottoIface, 'poolManager', [], operatorId);
+	const verifyPoolManager = verifyPoolManagerResult[0];
 
 	if (verifyLazyLotto.toLowerCase() === lazyLottoId.toSolidityAddress().toLowerCase() &&
 		verifyPoolManager.toLowerCase() === poolManagerId.toSolidityAddress().toLowerCase()) {

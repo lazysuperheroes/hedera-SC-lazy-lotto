@@ -385,7 +385,7 @@ async function getJackpotDisplay(contract) {
     };
 }
 
-function formatLazyToken(amount, decimals = 8) {
+function formatLazyToken(amount, decimals = 1) {
     return ethers.utils.formatUnits(amount, decimals);
 }
 ```
