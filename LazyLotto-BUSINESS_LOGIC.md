@@ -80,8 +80,20 @@ LazyLotto exposes `calculateBoost(user)` as a facade that delegates to PoolManag
 
 **Payment Methods**:
 - HBAR: Send native currency with transaction
-- $LAZY: Automatic burn percentage applied, drawn from LazyGasStation
+- $LAZY: Optional burn percentage applied on entry fees (see Burn Strategy below), drawn from LazyGasStation
 - Other HTS Tokens: Standard ERC20 transfer with approval
+
+**$LAZY Burn Strategy**:
+
+The `burnPercentage` setting controls what percentage of $LAZY entry fees are burned (destroyed) vs recorded as pool proceeds. This is frozen per-pool at creation time and only affects pools that charge $LAZY as the entry fee. It does not apply to HBAR fees, other token fees, prize deposits, or creation fees.
+
+Two recommended approaches:
+
+- **Zero burn (recommended)**: Set `burnPercentage = 0` at deploy time. All $LAZY entry fees go to pool proceeds. The team can manually claim and burn $LAZY from global pool proceeds via `withdrawGlobalPoolProceeds`, turning it into a community event. This is simpler, more transparent, and fairer for community pool owners who keep 100% of their proceeds (minus platform fee).
+
+- **Automatic burn**: Set `burnPercentage > 0` (e.g., 50%). Half of every $LAZY entry fee is silently burned. This reduces supply automatically but also reduces what pool owners earn. If using this approach, consider setting a high burn for team pools first, then calling `setBurnPercentage(0)` before community pools are created — each pool freezes the burn percentage at the time it's created.
+
+The burn percentage is a constructor parameter and can be changed by admins via `setBurnPercentage()`. Existing pools retain their frozen value; only newly created pools pick up the current value.
 
 ### 2. NFT-Based Ticket Trading
 
@@ -128,7 +140,7 @@ LazyLotto exposes `calculateBoost(user)` as a facade that delegates to PoolManag
 1. User calls `createPool()` with same parameters as above
 2. Contract validates and collects creation fees:
    - HBAR fee forwarded to PoolManager
-   - $LAZY fee burned via LazyGasStation
+   - $LAZY fee drawn via LazyGasStation (no burn on creation fees)
    - Fee amounts queryable via `PoolManager.getCreationFees()`
 3. PoolManager records pool as community:
    - Sets `poolOwners[poolId] = creator`
@@ -147,7 +159,7 @@ LazyLotto exposes `calculateBoost(user)` as a facade that delegates to PoolManag
 Any user can create a community pool by paying the required creation fees:
 - **Query fees**: `PoolManager.getCreationFees()` returns `(hbarFee, lazyFee)`
 - **HBAR fee**: Sent as msg.value (collected by PoolManager)
-- **$LAZY fee**: Burned from user's balance via LazyGasStation
+- **$LAZY fee**: Drawn from user's balance via LazyGasStation (no burn on creation fees)
 - **Admin fee setting**: `PoolManager.setCreationFees(hbarFee, lazyFee)` (admin-only)
 - **Proceeds**: Pool owner receives entry fee proceeds minus the platform fee percentage
 - **Platform fee lock-in**: The platform fee percentage active at pool creation time is permanently locked for that pool via `poolPlatformFeePercentage[poolId]`
