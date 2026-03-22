@@ -1,0 +1,79 @@
+{
+  "network": "testnet",
+  "description": "Redeployment config - mirrors 0.0.8011899 with v1.3.0 audit fixes",
+  "previousDeployment": {
+    "lazyLotto": "0.0.8011899",
+    "lazyLottoPoolManager": "0.0.8011909",
+    "lazyLottoStorage": "0.0.8011890"
+  },
+  "existingInfrastructure": {
+    "lazyToken": "0.0.8011209",
+    "lazyGasStation": "0.0.8011801",
+    "lazyDelegateRegistry": "0.0.8011807",
+    "prngContract": "0.0.8238310",
+    "lshGen1TokenId": "0.0.8011515",
+    "lshGen2TokenId": "0.0.8011516",
+    "lshGen1MutantTokenId": "0.0.8011533"
+  },
+  "lazyLottoSettings": {
+    "burnPercentage": 50
+  },
+  "poolManagerSettings": {
+    "platformProceedsPercentage": 5,
+    "hbarCreationFee": 1000000000,
+    "lazyCreationFee": 888,
+    "bonuses": {
+      "lazyBalance": {
+        "threshold": 500000,
+        "bonusBps": 125
+      },
+      "nftHolding": [
+        { "tokenId": "0.0.8011515", "name": "LSH Gen1", "bonusBps": 500 },
+        { "tokenId": "0.0.8011516", "name": "LSH Gen2", "bonusBps": 350 },
+        { "tokenId": "0.0.8011533", "name": "LSH Gen1 Mutant", "bonusBps": 250 }
+      ],
+      "timeBonuses": []
+    }
+  },
+  "globalPools": [
+    {
+      "poolId": 0,
+      "name": "HBAR Pool",
+      "description": "1-in-3 odds, 2 HBAR entry",
+      "ticketCID": "ipfs://QmbMBSr8tAQaz5MifuqzcsaSztewBYBfLpmrR7bKdnX1ye/ticket1.json",
+      "winCID": "ipfs://QmbMBSr8tAQaz5MifuqzcsaSztewBYBfLpmrR7bKdnX1ye/prize1.json",
+      "winRateThousandthsOfBps": 33299999,
+      "entryFee": 200000000,
+      "feeToken": "0x0000000000000000000000000000000000000000",
+      "feeTokenDescription": "HBAR (2 HBAR)"
+    },
+    {
+      "poolId": 1,
+      "name": "LAZY Pool",
+      "description": "1-in-4 odds, 5.0 LAZY entry",
+      "ticketCID": "ipfs://QmbMBSr8tAQaz5MifuqzcsaSztewBYBfLpmrR7bKdnX1ye/ticket2.json",
+      "winCID": "ipfs://QmbMBSr8tAQaz5MifuqzcsaSztewBYBfLpmrR7bKdnX1ye/prize2.json",
+      "winRateThousandthsOfBps": 25000000,
+      "entryFee": 50,
+      "feeToken": "LAZY",
+      "feeTokenDescription": "$LAZY (5.0 LAZY at 1 decimal = 50 raw)"
+    },
+    {
+      "poolId": 2,
+      "name": "HBAR Premium Pool",
+      "description": "~1-in-11 odds, 10 HBAR entry",
+      "ticketCID": "ipfs://QmbMBSr8tAQaz5MifuqzcsaSztewBYBfLpmrR7bKdnX1ye/ticket3.json",
+      "winCID": "ipfs://QmbMBSr8tAQaz5MifuqzcsaSztewBYBfLpmrR7bKdnX1ye/prize3.json",
+      "winRateThousandthsOfBps": 8880000,
+      "entryFee": 1000000000,
+      "feeToken": "0x0000000000000000000000000000000000000000",
+      "feeTokenDescription": "HBAR (10 HBAR)"
+    }
+  ],
+  "notes": {
+    "prizesNotIncluded": "Prize packages must be added separately after pool creation — use addPrizePackage/addMultipleFungiblePrizes scripts or batch JSON",
+    "gasStationConfig": "After deployment, add new LazyLotto and LazyLottoStorage as contract users to LazyGasStation via addContractUser.js",
+    "poolManagerLink": "PoolManager.setLazyLotto() must be called by deployer (not just any admin) — this is new in v1.3.0",
+    "existingUsers": "Users with outstanding entries/prizes on old contract cannot migrate — old contract should remain accessible for claims"
+  }
+}
