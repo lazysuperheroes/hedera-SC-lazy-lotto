@@ -82,6 +82,16 @@
         "type": "error"
     },
     {
+        "inputs": [],
+        "name": "TooManyNFTBonuses",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "TooManyTimeBonuses",
+        "type": "error"
+    },
+    {
         "anonymous": false,
         "inputs": [
             {
@@ -98,6 +108,50 @@
             }
         ],
         "name": "CreationFeesUpdated",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "recipient",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "hbarAmount",
+                "type": "uint256"
+            }
+        ],
+        "name": "CreationFeesWithdrawn",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "uint256",
+                "name": "poolId",
+                "type": "uint256"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "token",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            }
+        ],
+        "name": "GlobalPoolWithdrawal",
         "type": "event"
     },
     {
@@ -364,6 +418,32 @@
         "type": "fallback"
     },
     {
+        "inputs": [],
+        "name": "MAX_NFT_BONUS_TOKENS",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "MAX_TIME_BONUSES",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
         "inputs": [
             {
                 "internalType": "address",
@@ -510,6 +590,19 @@
         "type": "function"
     },
     {
+        "inputs": [],
+        "name": "getGlobalPrizeManagerCount",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "count",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
         "inputs": [
             {
                 "internalType": "address",
@@ -522,6 +615,25 @@
             {
                 "internalType": "uint256",
                 "name": "amount",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "poolId",
+                "type": "uint256"
+            }
+        ],
+        "name": "getPoolBurnPercentage",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "percentage",
                 "type": "uint256"
             }
         ],
@@ -891,6 +1003,25 @@
                 "type": "uint256"
             }
         ],
+        "name": "poolBurnPercentage",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
         "name": "poolOwners",
         "outputs": [
             {
@@ -956,6 +1087,16 @@
                 "internalType": "bool",
                 "name": "isGlobalAdmin",
                 "type": "bool"
+            },
+            {
+                "internalType": "uint256",
+                "name": "lazyFeeCollected",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "_burnPercentage",
+                "type": "uint256"
             }
         ],
         "name": "recordPoolCreation",
@@ -1022,6 +1163,30 @@
         ],
         "name": "removeTimeBonus",
         "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "poolId",
+                "type": "uint256"
+            },
+            {
+                "internalType": "address",
+                "name": "token",
+                "type": "address"
+            }
+        ],
+        "name": "requestGlobalWithdrawal",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            }
+        ],
         "stateMutability": "nonpayable",
         "type": "function"
     },
@@ -1322,6 +1487,19 @@
             }
         ],
         "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address payable",
+                "name": "recipient",
+                "type": "address"
+            }
+        ],
+        "name": "withdrawCreationFees",
+        "outputs": [],
+        "stateMutability": "nonpayable",
         "type": "function"
     },
     {

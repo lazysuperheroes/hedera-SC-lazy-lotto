@@ -927,7 +927,7 @@ describe('LazyLotto - Admin Management:', function () {
 			contractId,
 			lazyLottoIface,
 			client,
-			gasEstimate.gasLimit * 1.2,
+			gasEstimate.gasLimit * 1.5,
 			'removeAdmin',
 			[adminId.toSolidityAddress()],
 		);
@@ -986,7 +986,7 @@ describe('LazyLotto - Admin Management:', function () {
 			contractId,
 			lazyLottoIface,
 			client,
-			gasEstimate.gasLimit * 1.2,
+			gasEstimate.gasLimit * 1.5,
 			'addAdmin',
 			[adminId.toSolidityAddress()],
 		);
@@ -5393,6 +5393,343 @@ describe('LazyLotto - Time-Based Testing Scenarios:', function () {
 			console.log('\t✗ Time bonus test failed:', error.message);
 			expect.fail('Time bonus test failed');
 		}
+	});
+});
+
+describe('LazyLotto - Audit Fix: Admin Withdrawal Safety Checks:', function () {
+	it('Should reject transferHbarFromStorage when it would breach combined obligations', async function () {
+		console.log('\n-Testing transferHbarFromStorage safety check...');
+
+		client.setOperator(operatorId, operatorKey);
+
+		await sleep(5000);
+
+		// Step 1: Get storage contract HBAR balance
+		const storageBalanceTinybars = await checkMirrorHbarBalance(env, storageContractId);
+		console.log(`-Storage contract HBAR balance: ${storageBalanceTinybars} tinybars`);
+
+		// Step 2: Query getFungiblesNeededForPrizes for HBAR (address(0))
+		const prizesCmd = lazyLottoIface.encodeFunctionData('getFungiblesNeededForPrizes', [ZERO_ADDRESS]);
+		const prizesResult = await readOnlyEVMFromMirrorNode(env, contractId, prizesCmd, operatorId, false);
+		const prizesNeeded = lazyLottoIface.decodeFunctionResult('getFungiblesNeededForPrizes', prizesResult);
+		const prizesAmount = BigInt(prizesNeeded[0]);
+		console.log(`-HBAR prizes obligation: ${prizesAmount}`);
+
+		// Step 3: Query PoolManager pendingWithdrawals for HBAR
+		const pendingCmd = poolManagerIface.encodeFunctionData('pendingWithdrawals', [ZERO_ADDRESS]);
+		const pendingResult = await readOnlyEVMFromMirrorNode(env, poolManagerId, pendingCmd, operatorId, false);
+		const pendingAmount = BigInt(poolManagerIface.decodeFunctionResult('pendingWithdrawals', pendingResult)[0]);
+		console.log(`-HBAR pending withdrawals: ${pendingAmount}`);
+
+		// Step 4: Query PoolManager getPlatformBalance for HBAR
+		const platformCmd = poolManagerIface.encodeFunctionData('getPlatformBalance', [ZERO_ADDRESS]);
+		const platformResult = await readOnlyEVMFromMirrorNode(env, poolManagerId, platformCmd, operatorId, false);
+		const platformAmount = BigInt(poolManagerIface.decodeFunctionResult('getPlatformBalance', platformResult)[0]);
+		console.log(`-HBAR platform balance: ${platformAmount}`);
+
+		// Step 5: Calculate total obligations and surplus
+		const totalObligations = prizesAmount + pendingAmount + platformAmount;
+		const storageBalance = BigInt(storageBalanceTinybars);
+		console.log(`-Total obligations: ${totalObligations}`);
+		console.log(`-Storage balance: ${storageBalance}`);
+
+		// Calculate one more than the allowed withdrawal
+		const surplus = storageBalance > totalObligations ? storageBalance - totalObligations : 0n;
+		const overWithdrawAmount = surplus + 1n;
+		console.log(`-Surplus: ${surplus}, attempting to withdraw: ${overWithdrawAmount}`);
+
+		// Step 6: Try to withdraw more than allowed — should revert
+		let expectedErrors = 0;
+		let unexpectedErrors = 0;
+
+		try {
+			const result = await contractExecuteFunction(
+				contractId,
+				lazyLottoIface,
+				client,
+				500_000,
+				'transferHbarFromStorage',
+				[operatorId.toSolidityAddress(), overWithdrawAmount],
+			);
+
+			if (result[0]?.status?.toString() !== 'SUCCESS') {
+				expectedErrors++;
+				console.log(`\t✓ Correctly rejected withdrawal: ${result[0]?.status?.toString()}`);
+			}
+			else {
+				unexpectedErrors++;
+				console.log('\t✗ Withdrawal should have been rejected but succeeded');
+			}
+		}
+		catch (error) {
+			if (error.message?.includes('CONTRACT_REVERT_EXECUTED') || error.message?.includes('BalanceError')) {
+				expectedErrors++;
+				console.log('\t✓ Correctly reverted with BalanceError');
+			}
+			else {
+				unexpectedErrors++;
+				console.log('\t✗ Unexpected error:', error.message);
+			}
+		}
+
+		expect(expectedErrors).to.be.equal(1);
+		expect(unexpectedErrors).to.be.equal(0);
+		console.log('-Safety check prevents over-withdrawal of HBAR from storage');
+	});
+
+	it('Should allow transferHbarFromStorage when sufficient surplus exists', async function () {
+		console.log('\n-Testing transferHbarFromStorage with valid surplus...');
+
+		client.setOperator(operatorId, operatorKey);
+
+		await sleep(5000);
+
+		// Step 1: Get storage contract HBAR balance
+		const storageBalanceTinybars = await checkMirrorHbarBalance(env, storageContractId);
+		console.log(`-Storage contract HBAR balance: ${storageBalanceTinybars} tinybars`);
+
+		// Step 2: Query getFungiblesNeededForPrizes for HBAR
+		const prizesCmd = lazyLottoIface.encodeFunctionData('getFungiblesNeededForPrizes', [ZERO_ADDRESS]);
+		const prizesResult = await readOnlyEVMFromMirrorNode(env, contractId, prizesCmd, operatorId, false);
+		const prizesNeeded = lazyLottoIface.decodeFunctionResult('getFungiblesNeededForPrizes', prizesResult);
+		const prizesAmount = BigInt(prizesNeeded[0]);
+
+		// Step 3: Query PoolManager pendingWithdrawals for HBAR
+		const pendingCmd = poolManagerIface.encodeFunctionData('pendingWithdrawals', [ZERO_ADDRESS]);
+		const pendingResult = await readOnlyEVMFromMirrorNode(env, poolManagerId, pendingCmd, operatorId, false);
+		const pendingAmount = BigInt(poolManagerIface.decodeFunctionResult('pendingWithdrawals', pendingResult)[0]);
+
+		// Step 4: Query PoolManager getPlatformBalance for HBAR
+		const platformCmd = poolManagerIface.encodeFunctionData('getPlatformBalance', [ZERO_ADDRESS]);
+		const platformResult = await readOnlyEVMFromMirrorNode(env, poolManagerId, platformCmd, operatorId, false);
+		const platformAmount = BigInt(poolManagerIface.decodeFunctionResult('getPlatformBalance', platformResult)[0]);
+
+		// Step 5: Calculate surplus
+		const totalObligations = prizesAmount + pendingAmount + platformAmount;
+		const storageBalance = BigInt(storageBalanceTinybars);
+		const surplus = storageBalance > totalObligations ? storageBalance - totalObligations : 0n;
+
+		console.log(`-Total obligations: ${totalObligations}`);
+		console.log(`-Surplus available: ${surplus}`);
+
+		if (surplus === 0n) {
+			console.log('-No surplus available, skipping withdrawal test');
+			console.log('\t✓ Test skipped (no surplus to withdraw)');
+			return;
+		}
+
+		// Withdraw 1 tinybar (minimal safe withdrawal)
+		const withdrawAmount = 1n;
+		console.log(`-Attempting to withdraw ${withdrawAmount} tinybar...`);
+
+		const gasEstimate = await estimateGas(
+			env,
+			contractId,
+			lazyLottoIface,
+			operatorId,
+			'transferHbarFromStorage',
+			[operatorId.toSolidityAddress(), withdrawAmount],
+			500_000,
+		);
+
+		const result = await contractExecuteFunction(
+			contractId,
+			lazyLottoIface,
+			client,
+			gasEstimate.gasLimit,
+			'transferHbarFromStorage',
+			[operatorId.toSolidityAddress(), withdrawAmount],
+		);
+
+		if (result[0]?.status?.toString() !== 'SUCCESS') {
+			console.log('\t✗ Withdrawal failed:', result[0]?.status?.toString());
+			fail('Valid surplus withdrawal should succeed');
+		}
+
+		console.log('\t✓ Successfully withdrew 1 tinybar from surplus');
+		console.log(`\t  Transaction ID: ${result[2]?.transactionId?.toString()}`);
+		console.log(parseTransactionRecord(result[2]));
+	});
+});
+
+describe('LazyLotto - Audit Fix: outstandingEntries NFT Fix:', function () {
+	// Module-scoped variables for this test suite
+	let auditPoolId;
+	let auditPoolTokenId;
+
+	it('Should create a new pool for outstandingEntries tracking test', async function () {
+		console.log('\n-Creating new pool for outstandingEntries audit test...');
+
+		client.setOperator(operatorId, operatorKey);
+
+		const gasEstimate = await estimateGas(
+			env,
+			contractId,
+			lazyLottoIface,
+			operatorId,
+			'createPool',
+			[
+				'Audit Entries Pool',
+				'AEP',
+				'Pool for testing outstandingEntries fix',
+				[],
+				'QmAuditTicketCID',
+				'QmAuditWinCID',
+				WIN_RATE_THRESHOLD,
+				ENTRY_FEE_HBAR,
+				ZERO_ADDRESS,
+			],
+			3_000_000,
+			Number(new Hbar(MINT_PAYMENT, HbarUnit.Hbar).toTinybars()),
+		);
+
+		const result = await contractExecuteFunction(
+			contractId,
+			lazyLottoIface,
+			client,
+			gasEstimate.gasLimit,
+			'createPool',
+			[
+				'Audit Entries Pool',
+				'AEP',
+				'Pool for testing outstandingEntries fix',
+				[],
+				'QmAuditTicketCID',
+				'QmAuditWinCID',
+				WIN_RATE_THRESHOLD,
+				ENTRY_FEE_HBAR,
+				ZERO_ADDRESS,
+			],
+			new Hbar(MINT_PAYMENT, HbarUnit.Hbar),
+		);
+
+		if (result[0]?.status?.toString() !== 'SUCCESS') {
+			console.log('Pool creation failed:', result[0]?.status?.toString());
+			fail('Audit test pool creation failed');
+		}
+
+		auditPoolId = Number(result[1][0]);
+		console.log(`-Created audit test Pool ID: ${auditPoolId}`);
+		console.log(parseTransactionRecord(result[2]));
+
+		await sleep(5000);
+
+		// Get the pool token ID for association
+		const poolCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [auditPoolId]);
+		const poolResult = await readOnlyEVMFromMirrorNode(env, contractId, poolCommand, operatorId, false);
+		const poolDetails = lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', poolResult);
+		auditPoolTokenId = TokenId.fromSolidityAddress(poolDetails[6]);
+		console.log(`-Pool ticket token: ${auditPoolTokenId.toString()}`);
+
+		// Associate Bob with the new pool's ticket token
+		client.setOperator(bobId, bobPK);
+		const assocResult = await associateTokensToAccount(
+			client,
+			bobId,
+			bobPK,
+			[auditPoolTokenId],
+		);
+		expect(assocResult).to.be.equal('SUCCESS');
+		console.log(`-Associated ticket token to Bob (${bobId.toString()})`);
+	});
+
+	it('Should correctly track outstandingEntries after redeemEntriesToNFT', async function () {
+		console.log('\n-Testing outstandingEntries tracking after NFT redemption...');
+
+		const ticketCount = 5;
+
+		// Step 1: Bob buys 5 entries
+		console.log(`-Bob buying ${ticketCount} entries in pool ${auditPoolId}...`);
+		client.setOperator(bobId, bobPK);
+
+		const totalFee = ENTRY_FEE_HBAR * ticketCount;
+
+		const buyGasEstimate = await estimateGas(
+			env,
+			contractId,
+			lazyLottoIface,
+			bobId,
+			'buyEntry',
+			[auditPoolId, ticketCount],
+			1_500_000,
+			totalFee,
+		);
+
+		const buyResult = await contractExecuteFunction(
+			contractId,
+			lazyLottoIface,
+			client,
+			buyGasEstimate.gasLimit,
+			'buyEntry',
+			[auditPoolId, ticketCount],
+			new Hbar(totalFee, HbarUnit.Tinybar),
+		);
+
+		if (buyResult[0]?.status?.toString() !== 'SUCCESS') {
+			console.log('buyEntry failed:', buyResult[0]?.status?.toString());
+			fail('Bob should be able to buy entries');
+		}
+
+		console.log('\t✓ Bob purchased 5 entries');
+		console.log(parseTransactionRecord(buyResult[2]));
+
+		await sleep(5000);
+
+		// Step 2: Verify outstandingEntries == 5
+		let poolCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [auditPoolId]);
+		let poolResult = await readOnlyEVMFromMirrorNode(env, contractId, poolCommand, operatorId, false);
+		let poolDetails = lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', poolResult);
+		const outstandingAfterBuy = Number(poolDetails[5]);
+		console.log(`-outstandingEntries after buy: ${outstandingAfterBuy}`);
+		expect(outstandingAfterBuy).to.be.equal(ticketCount, 'Should have 5 outstanding entries after purchase');
+		console.log('\t✓ outstandingEntries == 5 after purchase');
+
+		// Step 3: Bob redeems 3 entries to NFTs
+		const redeemCount = 3;
+		console.log(`-Bob redeeming ${redeemCount} entries to NFTs...`);
+		client.setOperator(bobId, bobPK);
+
+		const redeemGasEstimate = await estimateGas(
+			env,
+			contractId,
+			lazyLottoIface,
+			bobId,
+			'redeemEntriesToNFT',
+			[auditPoolId, redeemCount],
+			1_500_000,
+		);
+
+		const redeemResult = await contractExecuteFunction(
+			contractId,
+			lazyLottoIface,
+			client,
+			redeemGasEstimate.gasLimit,
+			'redeemEntriesToNFT',
+			[auditPoolId, redeemCount],
+		);
+
+		if (redeemResult[0]?.status?.toString() !== 'SUCCESS') {
+			console.log('redeemEntriesToNFT failed:', redeemResult[0]?.status?.toString());
+			fail('Bob should be able to redeem entries to NFTs');
+		}
+
+		console.log('\t✓ Bob redeemed 3 entries to NFTs');
+		console.log(parseTransactionRecord(redeemResult[2]));
+
+		await sleep(5000);
+
+		// Step 4: Verify outstandingEntries == 2 (NOT still 5)
+		poolCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [auditPoolId]);
+		poolResult = await readOnlyEVMFromMirrorNode(env, contractId, poolCommand, operatorId, false);
+		poolDetails = lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', poolResult);
+		const outstandingAfterRedeem = Number(poolDetails[5]);
+		console.log(`-outstandingEntries after redeem: ${outstandingAfterRedeem}`);
+		expect(outstandingAfterRedeem).to.be.equal(
+			ticketCount - redeemCount,
+			`Should have ${ticketCount - redeemCount} outstanding entries after redeeming ${redeemCount}`,
+		);
+		console.log(`\t✓ outstandingEntries == ${ticketCount - redeemCount} after redeeming ${redeemCount} to NFTs`);
+		console.log('\t✓ Audit fix verified: outstandingEntries correctly decremented on NFT redemption');
 	});
 });
 

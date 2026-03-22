@@ -34,7 +34,9 @@ interface ILazyLottoPoolManager {
     function recordPoolCreation(
         uint256 poolId,
         address creator,
-        bool isGlobalAdmin
+        bool isGlobalAdmin,
+        uint256 lazyFeeCollected,
+        uint256 _burnPercentage
     ) external payable;
 
     // --- PROCEEDS ---
@@ -88,6 +90,15 @@ interface ILazyLottoPoolManager {
     /// @param token The token address (address(0) for HBAR)
     function withdrawPlatformFees(address token) external;
 
+    /// @notice Request withdrawal of global pool proceeds (called by LazyLotto)
+    /// @param poolId The pool ID (must be a global pool)
+    /// @param token The token address (address(0) for HBAR)
+    /// @return amount The full available amount to withdraw
+    function requestGlobalWithdrawal(
+        uint256 poolId,
+        address token
+    ) external returns (uint256 amount);
+
     // --- CREATION FEES ---
 
     /// @notice Get current creation fees
@@ -102,6 +113,17 @@ interface ILazyLottoPoolManager {
     /// @param hbarFee HBAR fee in tinybars
     /// @param lazyFee LAZY fee in base units
     function setCreationFees(uint256 hbarFee, uint256 lazyFee) external;
+
+    /// @notice Admin withdraws collected HBAR creation fees
+    /// @param recipient The address to send fees to
+    function withdrawCreationFees(address payable recipient) external;
+
+    // --- CONFIGURATION ---
+
+    /// @notice Get burn percentage frozen at pool creation time
+    /// @param poolId The pool ID
+    /// @return percentage The burn percentage (0-100)
+    function getPoolBurnPercentage(uint256 poolId) external view returns (uint256 percentage);
 
     // --- OWNERSHIP ---
 

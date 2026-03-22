@@ -98,9 +98,16 @@ contract LazyLottoPoolManager is ReentrancyGuard {
     );
     event CreationFeesUpdated(uint256 hbarFee, uint256 lazyFee);
     event PlatformProceedsPercentageUpdated(uint256 percentage);
+    event CreationFeesWithdrawn(address indexed recipient, uint256 hbarAmount);
+    event GlobalPoolWithdrawal(
+        uint256 indexed poolId,
+        address indexed token,
+        uint256 amount
+    );
 
     // --- STATE ---
 
+    address private immutable deployer;
     address public lazyLotto;
     address public lazyToken;
     address public lazyGasStation;
@@ -120,6 +127,7 @@ contract LazyLottoPoolManager is ReentrancyGuard {
     // Proceeds tracking
     mapping(uint256 => PoolProceeds) private poolProceeds;
     mapping(uint256 => uint256) public poolPlatformFeePercentage; // poolId => fee% at creation time
+    mapping(uint256 => uint256) public poolBurnPercentage; // poolId => burn% at creation time
     mapping(address => uint256) public pendingWithdrawals; // token => total owed to ALL owners
     mapping(address => uint256) public platformProceedsBalance; // token => accumulated platform cut
     uint256 public platformProceedsPercentage = 5; // 5% platform rake (default)
@@ -160,12 +168,14 @@ contract LazyLottoPoolManager is ReentrancyGuard {
         lazyToken = _lazyToken;
         lazyGasStation = _lazyGasStation;
         lazyDelegateRegistry = _lazyDelegateRegistry;
+        deployer = msg.sender;
         // lazyLotto set via setLazyLotto() after deployment
     }
 
     /// @notice Set LazyLotto contract address (one-time only, called by admin after deployment)
     /// @param _lazyLotto The LazyLotto contract address
     function setLazyLotto(address _lazyLotto) external {
+        if (msg.sender != deployer) revert NotAuthorized();
         if (_lazyLotto == address(0)) revert BadParameters();
         if (lazyLotto != address(0)) revert LazyLottoAlreadySet();
         lazyLotto = _lazyLotto;
@@ -222,9 +232,14 @@ contract LazyLottoPoolManager is ReentrancyGuard {
     function recordPoolCreation(
         uint256 poolId,
         address creator,
-        bool isGlobalAdmin
+        bool isGlobalAdmin,
+        uint256 lazyFeeCollected,
+        uint256 _burnPercentage
     ) external payable nonReentrant {
         if (msg.sender != lazyLotto) revert NotLazyLotto();
+
+        // Freeze burn percentage at pool creation time
+        poolBurnPercentage[poolId] = _burnPercentage;
 
         if (!isGlobalAdmin) {
             // Capture platform fee percentage at creation time
@@ -236,8 +251,7 @@ contract LazyLottoPoolManager is ReentrancyGuard {
             }
 
             totalHbarCollected += msg.value;
-
-            // LAZY fee handled by LazyLotto via LazyGasStation
+            totalLazyCollected += lazyFeeCollected;
 
             // Register community pool
             poolOwners[poolId] = creator;
@@ -278,6 +292,23 @@ contract LazyLottoPoolManager is ReentrancyGuard {
         emit CreationFeesUpdated(_hbarFee, _lazyFee);
     }
 
+    /// @notice Admin withdraws collected HBAR creation fees
+    /// @param recipient The address to send fees to
+    function withdrawCreationFees(address payable recipient) external nonReentrant {
+        if (!ILazyLotto(lazyLotto).isAdmin(msg.sender)) revert NotAuthorized();
+        if (recipient == address(0)) revert BadParameters();
+
+        uint256 hbarToSend = totalHbarCollected;
+        if (hbarToSend == 0) revert NothingToWithdraw();
+
+        totalHbarCollected = 0;
+
+        (bool success, ) = recipient.call{value: hbarToSend}("");
+        if (!success) revert BadParameters();
+
+        emit CreationFeesWithdrawn(recipient, hbarToSend);
+    }
+
     // --- PROCEEDS MANAGEMENT ---
 
     /// @notice Record proceeds from entry purchases (called by LazyLotto)
@@ -296,7 +327,8 @@ contract LazyLottoPoolManager is ReentrancyGuard {
         // Track global obligations (owner's share after platform cut)
         // Use the platform fee percentage that was set when pool was created
         uint256 poolFeePercentage = poolPlatformFeePercentage[poolId];
-        uint256 ownerShare = (amount * (100 - poolFeePercentage)) / 100;
+        uint256 platformCut = (amount * poolFeePercentage) / 100;
+        uint256 ownerShare = amount - platformCut;
         pendingWithdrawals[token] += ownerShare;
 
         emit ProceedsRecorded(poolId, token, amount);
@@ -376,6 +408,34 @@ contract LazyLottoPoolManager is ReentrancyGuard {
     function withdrawPlatformFees(address token) external {
         if (msg.sender != lazyLotto) revert NotLazyLotto();
         platformProceedsBalance[token] = 0;
+    }
+
+    /// @notice Request withdrawal of global pool proceeds (called by LazyLotto)
+    /// @param poolId The pool ID (must be a global pool)
+    /// @param token The token address (address(0) for HBAR)
+    /// @return amount The full available amount to withdraw
+    function requestGlobalWithdrawal(
+        uint256 poolId,
+        address token
+    ) external nonReentrant returns (uint256 amount) {
+        if (msg.sender != lazyLotto) revert NotLazyLotto();
+
+        // Must be a global pool
+        if (poolOwners[poolId] != address(0)) revert NotAuthorized();
+
+        PoolProceeds storage proceeds = poolProceeds[poolId];
+        uint256 total = proceeds.totalProceeds[token];
+        uint256 withdrawn = proceeds.withdrawnProceeds[token];
+        amount = total - withdrawn;
+
+        if (amount == 0) revert NothingToWithdraw();
+
+        proceeds.withdrawnProceeds[token] += amount;
+        pendingWithdrawals[token] -= amount;
+
+        emit GlobalPoolWithdrawal(poolId, token, amount);
+
+        return amount;
     }
 
     /// @notice Set platform proceeds percentage
@@ -601,6 +661,15 @@ contract LazyLottoPoolManager is ReentrancyGuard {
         uint256 poolId
     ) external view returns (uint256 percentage) {
         return poolPlatformFeePercentage[poolId];
+    }
+
+    /// @notice Get burn percentage that was frozen at pool creation time
+    /// @param poolId The pool ID
+    /// @return percentage The burn percentage (0-100)
+    function getPoolBurnPercentage(
+        uint256 poolId
+    ) external view returns (uint256 percentage) {
+        return poolBurnPercentage[poolId];
     }
 
     // --- BONUS SYSTEM (MIGRATED FROM LAZYLOTTO) ---

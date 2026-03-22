@@ -112,13 +112,13 @@ See `scripts/interactions/README.md` for complete script documentation (41 scrip
 
 ### Smart Contract Constraints
 
-1. **Contract Size Limit**: Hedera enforces 24KB limit. LazyLotto at 23.782KB required library extraction and optimizer tuning (`viaIR: true`, `runs: 200`).
+1. **Contract Size Limit**: Hedera enforces 24KB limit. LazyLotto at 23.661KB required library extraction and optimizer tuning (`viaIR: true`, `runs: 200`).
 
 2. **ReentrancyGuard**: Applied to ALL state-changing functions in both LazyLotto and LazyLottoPoolManager.
 
 3. **Pausability**: Both lottery contracts inherit OpenZeppelin's Pausable. Prize claims allowed even when paused.
 
-4. **Fee Immutability**: Platform fee % locked at pool creation (stored per-pool) to prevent retroactive changes.
+4. **Fee Immutability**: Platform fee % and burn % locked at pool creation (stored per-pool) to prevent retroactive changes.
 
 ### JavaScript Utilities Architecture
 
@@ -214,9 +214,10 @@ Copy from `.env.example` and populate with your credentials.
 - Withdraw platform fees (default 5% of pool proceeds)
 
 ### What Admins Cannot Do
-- Steal prizes (enforced by contract math: `storageBalance - withdrawal >= prizesOwed`)
-- Change fees retroactively (fee % frozen at pool creation)
-- Withdraw prize-obligated tokens (safety checks prevent this)
+- Steal prizes (enforced by contract math: `storageBalance - withdrawal >= prizesOwed + pendingWithdrawals + platformBalance`)
+- Change fees retroactively (fee % and burn % frozen at pool creation)
+- Withdraw prize-obligated or proceeds-obligated tokens (safety checks prevent this)
+- Extract community pool prizes to themselves (removed prizes go to pool owner)
 - Access users' NFT tickets (users maintain custody)
 - Prevent prize claims (claimable even when paused)
 
@@ -526,6 +527,7 @@ npm test -- test/multiKeyType.test.js
 6. **HTS Response Codes**: Check return values from HTS operations (don't assume success). Use HederaResponseCodes mapping.
 7. **PRNG Seed Processing**: Raw PRNG seed must be hashed with nonces for different random values (see LazyLotto's `_processPRNG()`)
 8. **Pool Fee Lock-In**: Platform fee % cannot be changed after pool creation (per-pool immutable field)
+9. **Fee-on-Transfer Tokens**: Fee-on-transfer tokens (HTS tokens with custom fractional transfer fees) are supported but behave differently — prize amounts and proceeds are tracked by *actual received amount* after fees, not the requested amount. Pool creators should be aware that prizes added with fee-on-transfer tokens will have slightly lower amounts than specified.
 
 ## Quick Reference
 

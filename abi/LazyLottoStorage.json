@@ -37,6 +37,17 @@
         "type": "error"
     },
     {
+        "inputs": [
+            {
+                "internalType": "int32",
+                "name": "responseCode",
+                "type": "int32"
+            }
+        ],
+        "name": "CryptoTransferFailed",
+        "type": "error"
+    },
+    {
         "inputs": [],
         "name": "FailedNFTCreate",
         "type": "error"
@@ -52,8 +63,94 @@
         "type": "error"
     },
     {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "token",
+                "type": "address"
+            }
+        ],
+        "name": "FungibleTransferFailed",
+        "type": "error"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "token",
+                "type": "address"
+            }
+        ],
+        "name": "FungibleWithdrawalFailed",
+        "type": "error"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "required",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "available",
+                "type": "uint256"
+            }
+        ],
+        "name": "InsufficientHbarBalance",
+        "type": "error"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "token",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "required",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "available",
+                "type": "uint256"
+            }
+        ],
+        "name": "InsufficientTokenBalance",
+        "type": "error"
+    },
+    {
         "inputs": [],
         "name": "LastAdminError",
+        "type": "error"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "int32",
+                "name": "responseCode",
+                "type": "int32"
+            }
+        ],
+        "name": "NFTBulkTransferFailed",
+        "type": "error"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "token",
+                "type": "address"
+            },
+            {
+                "internalType": "int32",
+                "name": "responseCode",
+                "type": "int32"
+            }
+        ],
+        "name": "NFTCollectionTransferFailed",
         "type": "error"
     },
     {
@@ -69,12 +166,17 @@
     {
         "inputs": [
             {
-                "internalType": "string",
-                "name": "operation",
-                "type": "string"
+                "internalType": "address",
+                "name": "token",
+                "type": "address"
+            },
+            {
+                "internalType": "address",
+                "name": "from",
+                "type": "address"
             }
         ],
-        "name": "TransferFailed",
+        "name": "PullFungibleFailed",
         "type": "error"
     },
     {
@@ -128,6 +230,37 @@
             {
                 "indexed": true,
                 "internalType": "address",
+                "name": "from",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "requestedAmount",
+                "type": "uint256"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "actualAmount",
+                "type": "uint256"
+            }
+        ],
+        "name": "FungiblePulled",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "token",
+                "type": "address"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
                 "name": "to",
                 "type": "address"
             },
@@ -139,6 +272,19 @@
             }
         ],
         "name": "FungibleTransferred",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            }
+        ],
+        "name": "HbarDeposited",
         "type": "event"
     },
     {
@@ -382,7 +528,13 @@
             }
         ],
         "name": "ensureFungibleBalance",
-        "outputs": [],
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "actualAmount",
+                "type": "uint256"
+            }
+        ],
         "stateMutability": "nonpayable",
         "type": "function"
     },
@@ -605,7 +757,13 @@
             }
         ],
         "name": "pullFungibleFrom",
-        "outputs": [],
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "actualAmount",
+                "type": "uint256"
+            }
+        ],
         "stateMutability": "nonpayable",
         "type": "function"
     },

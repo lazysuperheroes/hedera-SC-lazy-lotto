@@ -1237,6 +1237,33 @@ describe('LazyLottoPoolManager - Community Pool Creation:', function () {
 		expect(poolIds).to.include(testPoolId);
 		console.log('✓ Alice listed as owner of pool', testPoolId);
 	});
+
+	it('Should track totalLazyCollected after community pool creation', async function () {
+		console.log('\n-Verifying totalLazyCollected was incremented...');
+
+		// Get the LAZY creation fee that was charged
+		let encodedCommand = poolManagerIface.encodeFunctionData('getCreationFees');
+		let result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const fees = poolManagerIface.decodeFunctionResult('getCreationFees', result);
+		const lazyFee = Number(fees[1]);
+
+		// Query totalLazyCollected
+		encodedCommand = poolManagerIface.encodeFunctionData('totalLazyCollected');
+		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const totalLazy = poolManagerIface.decodeFunctionResult('totalLazyCollected', result);
+
+		// Should equal the LAZY fee from the one community pool created
+		expect(Number(totalLazy[0])).to.equal(lazyFee);
+		console.log('✓ totalLazyCollected:', totalLazy[0].toString(), '(matches creation fee:', lazyFee, ')');
+
+		// Also verify totalHbarCollected is non-zero
+		encodedCommand = poolManagerIface.encodeFunctionData('totalHbarCollected');
+		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const totalHbar = poolManagerIface.decodeFunctionResult('totalHbarCollected', result);
+
+		expect(Number(totalHbar[0])).to.be.greaterThan(0);
+		console.log('✓ totalHbarCollected:', totalHbar[0].toString());
+	});
 });
 
 describe('LazyLottoPoolManager - Proceeds Management (Integration):', function () {
@@ -1533,6 +1560,327 @@ describe('LazyLottoPoolManager - Proceeds Management (Integration):', function (
 
 		client.setOperator(operatorId, operatorKey);
 		console.log('✓ Non-owner correctly prevented from withdrawing');
+	});
+});
+
+describe('LazyLottoPoolManager - Global Pool Withdrawal:', function () {
+	let globalPoolId;
+	const ENTRY_FEE = 100_000_000; // 1 HBAR
+	const ENTRY_COUNT = 3;
+
+	it('Should create a global pool and buy entries for withdrawal test', async function () {
+		console.log('\n-Setting up global pool withdrawal test...');
+
+		// Create global pool as admin
+		client.setOperator(adminId, adminPK);
+
+		const tokenCreationCost = Number(new Hbar(20, HbarUnit.Hbar).toTinybars());
+
+		const createResult = await contractExecuteFunction(
+			lazyLottoId,
+			lazyLottoIface,
+			client,
+			5_000_000,
+			'createPool',
+			[
+				'Global Withdrawal Test',
+				'GWT',
+				'Global pool for withdrawal testing',
+				[],
+				'QmGlobalWithdrawTicketCID',
+				'QmGlobalWithdrawWinCID',
+				50_000_000,
+				ENTRY_FEE,
+				'0x0000000000000000000000000000000000000000',
+			],
+			new Hbar(tokenCreationCost, HbarUnit.Tinybar),
+		);
+
+		if (createResult[0]?.status?.toString() !== 'SUCCESS') {
+			console.log('Global pool creation FAILED:', createResult);
+			if (createResult[2]) console.log(parseTransactionRecord(createResult[2]));
+			fail('Global pool creation failed');
+		}
+
+		globalPoolId = Number(createResult[1][0]);
+		console.log('Created global pool:', globalPoolId);
+		await sleep(5000);
+
+		// Verify it's a global pool
+		let encodedCommand = poolManagerIface.encodeFunctionData('isGlobalPool', [globalPoolId]);
+		let result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const isGlobal = poolManagerIface.decodeFunctionResult('isGlobalPool', result);
+		expect(isGlobal[0]).to.equal(true);
+
+		// Bob buys entries to generate proceeds
+		client.setOperator(bobId, bobPK);
+
+		// Associate pool ticket token
+		encodedCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [globalPoolId]);
+		result = await readOnlyEVMFromMirrorNode(env, lazyLottoId, encodedCommand, operatorId, false);
+		const poolDetails = lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', result);
+		const poolTokenId = TokenId.fromSolidityAddress(poolDetails[6]);
+
+		const assocResult = await associateTokensToAccount(client, bobId, bobPK, [poolTokenId]);
+		expect(assocResult).to.equal('SUCCESS');
+
+		const totalCost = ENTRY_FEE * ENTRY_COUNT;
+
+		const buyResult = await contractExecuteFunction(
+			lazyLottoId,
+			lazyLottoIface,
+			client,
+			500_000,
+			'buyEntry',
+			[globalPoolId, ENTRY_COUNT],
+			new Hbar(totalCost, HbarUnit.Tinybar),
+		);
+
+		if (buyResult[0]?.status?.toString() !== 'SUCCESS') {
+			console.log('buyEntry FAILED:', buyResult);
+			if (buyResult[2]) console.log(parseTransactionRecord(buyResult[2]));
+			fail('buyEntry failed');
+		}
+
+		console.log('Bob purchased', ENTRY_COUNT, 'entries');
+		await sleep(5000);
+
+		// Verify proceeds were recorded
+		encodedCommand = poolManagerIface.encodeFunctionData('getPoolProceeds', [
+			globalPoolId,
+			'0x0000000000000000000000000000000000000000',
+		]);
+		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const proceeds = poolManagerIface.decodeFunctionResult('getPoolProceeds', result);
+
+		expect(Number(proceeds[0])).to.equal(totalCost);
+		expect(Number(proceeds[1])).to.equal(0);
+
+		client.setOperator(operatorId, operatorKey);
+		console.log('✓ Global pool has', proceeds[0].toString(), 'tinybars in proceeds');
+	});
+
+	it('Should prevent withdrawPoolProceeds on global pools', async function () {
+		console.log('\n-Testing that withdrawPoolProceeds reverts on global pools...');
+
+		client.setOperator(adminId, adminPK);
+
+		let expectedErrors = 0;
+		let unexpectedErrors = 0;
+
+		try {
+			const result = await contractExecuteFunction(
+				lazyLottoId,
+				lazyLottoIface,
+				client,
+				500_000,
+				'withdrawPoolProceeds',
+				[globalPoolId, '0x0000000000000000000000000000000000000000'],
+			);
+
+			if (result[0]?.status?.toString() !== 'SUCCESS') {
+				expectedErrors++;
+			} else {
+				console.log('Operation succeeded unexpectedly:', parseTransactionRecord(result[2]));
+				unexpectedErrors++;
+			}
+		} catch {
+			expectedErrors++;
+		}
+
+		expect(expectedErrors).to.be.equal(1);
+		expect(unexpectedErrors).to.be.equal(0);
+
+		client.setOperator(operatorId, operatorKey);
+		console.log('✓ withdrawPoolProceeds correctly reverts on global pool');
+	});
+
+	it('Should allow admin to withdraw global pool proceeds via withdrawGlobalPoolProceeds', async function () {
+		console.log('\n-Testing withdrawGlobalPoolProceeds...');
+
+		const totalCost = ENTRY_FEE * ENTRY_COUNT;
+
+		// Get proceeds before
+		let encodedCommand = poolManagerIface.encodeFunctionData('getPoolProceeds', [
+			globalPoolId,
+			'0x0000000000000000000000000000000000000000',
+		]);
+		let result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const proceedsBefore = poolManagerIface.decodeFunctionResult('getPoolProceeds', result);
+		const available = Number(proceedsBefore[0]) - Number(proceedsBefore[1]);
+
+		console.log('Available proceeds:', available);
+		expect(available).to.equal(totalCost);
+
+		// Admin withdraws global pool proceeds
+		client.setOperator(adminId, adminPK);
+
+		const gasEstimate = await estimateGas(
+			env,
+			lazyLottoId,
+			lazyLottoIface,
+			adminId,
+			'withdrawGlobalPoolProceeds',
+			[globalPoolId, '0x0000000000000000000000000000000000000000'],
+			500_000,
+		);
+
+		const withdrawResult = await contractExecuteFunction(
+			lazyLottoId,
+			lazyLottoIface,
+			client,
+			gasEstimate.gasLimit,
+			'withdrawGlobalPoolProceeds',
+			[globalPoolId, '0x0000000000000000000000000000000000000000'],
+		);
+
+		if (withdrawResult[0]?.status?.toString() !== 'SUCCESS') {
+			console.log('withdrawGlobalPoolProceeds FAILED:', withdrawResult);
+			if (withdrawResult[2]) console.log(parseTransactionRecord(withdrawResult[2]));
+			fail('withdrawGlobalPoolProceeds failed');
+		}
+
+		console.log(parseTransactionRecord(withdrawResult[2]));
+		await sleep(5000);
+
+		// Verify proceeds marked as withdrawn
+		encodedCommand = poolManagerIface.encodeFunctionData('getPoolProceeds', [
+			globalPoolId,
+			'0x0000000000000000000000000000000000000000',
+		]);
+		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const proceedsAfter = poolManagerIface.decodeFunctionResult('getPoolProceeds', result);
+
+		expect(Number(proceedsAfter[0])).to.equal(totalCost);
+		expect(Number(proceedsAfter[1])).to.equal(totalCost); // All withdrawn
+
+		client.setOperator(operatorId, operatorKey);
+		console.log('✓ Global pool proceeds withdrawn successfully, full amount:', totalCost);
+	});
+
+	it('Should revert when no proceeds available on global pool', async function () {
+		console.log('\n-Testing withdrawGlobalPoolProceeds with no proceeds...');
+
+		client.setOperator(adminId, adminPK);
+
+		let expectedErrors = 0;
+		let unexpectedErrors = 0;
+
+		try {
+			const result = await contractExecuteFunction(
+				lazyLottoId,
+				lazyLottoIface,
+				client,
+				500_000,
+				'withdrawGlobalPoolProceeds',
+				[globalPoolId, '0x0000000000000000000000000000000000000000'],
+			);
+
+			if (result[0]?.status?.toString() !== 'SUCCESS') {
+				expectedErrors++;
+			} else {
+				console.log('Operation succeeded unexpectedly:', parseTransactionRecord(result[2]));
+				unexpectedErrors++;
+			}
+		} catch {
+			expectedErrors++;
+		}
+
+		expect(expectedErrors).to.be.equal(1);
+		expect(unexpectedErrors).to.be.equal(0);
+
+		client.setOperator(operatorId, operatorKey);
+		console.log('✓ Correctly reverts when no proceeds available');
+	});
+
+	it('Should prevent non-admin from withdrawing global pool proceeds', async function () {
+		console.log('\n-Testing that non-admin cannot call withdrawGlobalPoolProceeds...');
+
+		// First add more proceeds so there's something to withdraw
+		client.setOperator(bobId, bobPK);
+		await contractExecuteFunction(
+			lazyLottoId,
+			lazyLottoIface,
+			client,
+			500_000,
+			'buyEntry',
+			[globalPoolId, 1],
+			new Hbar(ENTRY_FEE, HbarUnit.Tinybar),
+		);
+		await sleep(5000);
+
+		// Alice (non-admin) tries to withdraw
+		client.setOperator(aliceId, alicePK);
+
+		let expectedErrors = 0;
+		let unexpectedErrors = 0;
+
+		try {
+			const result = await contractExecuteFunction(
+				lazyLottoId,
+				lazyLottoIface,
+				client,
+				500_000,
+				'withdrawGlobalPoolProceeds',
+				[globalPoolId, '0x0000000000000000000000000000000000000000'],
+			);
+
+			if (result[0]?.status?.toString() !== 'SUCCESS') {
+				expectedErrors++;
+			} else {
+				console.log('Operation succeeded unexpectedly:', parseTransactionRecord(result[2]));
+				unexpectedErrors++;
+			}
+		} catch {
+			expectedErrors++;
+		}
+
+		expect(expectedErrors).to.be.equal(1);
+		expect(unexpectedErrors).to.be.equal(0);
+
+		client.setOperator(operatorId, operatorKey);
+		console.log('✓ Non-admin correctly prevented from withdrawing global pool proceeds');
+	});
+
+	it('Should prevent withdrawGlobalPoolProceeds on community pools', async function () {
+		console.log('\n-Testing that withdrawGlobalPoolProceeds reverts on community pools...');
+
+		// testPoolId is a community pool from the earlier test suite
+		if (testPoolId === null || testPoolId === undefined) {
+			console.log('ERROR: testPoolId not set from previous test');
+			fail('testPoolId not available');
+		}
+
+		client.setOperator(adminId, adminPK);
+
+		let expectedErrors = 0;
+		let unexpectedErrors = 0;
+
+		try {
+			const result = await contractExecuteFunction(
+				lazyLottoId,
+				lazyLottoIface,
+				client,
+				500_000,
+				'withdrawGlobalPoolProceeds',
+				[testPoolId, '0x0000000000000000000000000000000000000000'],
+			);
+
+			if (result[0]?.status?.toString() !== 'SUCCESS') {
+				expectedErrors++;
+			} else {
+				console.log('Operation succeeded unexpectedly:', parseTransactionRecord(result[2]));
+				unexpectedErrors++;
+			}
+		} catch {
+			expectedErrors++;
+		}
+
+		expect(expectedErrors).to.be.equal(1);
+		expect(unexpectedErrors).to.be.equal(0);
+
+		client.setOperator(operatorId, operatorKey);
+		console.log('✓ withdrawGlobalPoolProceeds correctly reverts on community pool');
 	});
 });
 
@@ -2168,6 +2516,549 @@ describe('LazyLottoPoolManager - Prize Manager Authorization:', function () {
 
 		client.setOperator(operatorId, operatorKey);
 		console.log('✓ Pool prize manager removed');
+	});
+});
+
+describe('LazyLottoPoolManager - Audit Fix: Creation Fee Withdrawal:', function () {
+	it('Should allow admin to withdraw creation fees (HBAR)', async function () {
+		console.log('\n-Testing withdrawCreationFees...');
+
+		// Verify totalHbarCollected > 0 from earlier community pool creation
+		let encodedCommand = poolManagerIface.encodeFunctionData('totalHbarCollected');
+		let result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const totalHbarBefore = poolManagerIface.decodeFunctionResult('totalHbarCollected', result);
+
+		console.log('totalHbarCollected before:', totalHbarBefore[0].toString());
+		expect(Number(totalHbarBefore[0])).to.be.greaterThan(0);
+
+		// Get admin HBAR balance before
+		const adminBalanceBefore = await checkMirrorHbarBalance(env, adminId);
+		console.log('Admin HBAR balance before:', adminBalanceBefore);
+
+		// Admin calls withdrawCreationFees on PoolManager
+		client.setOperator(adminId, adminPK);
+
+		const gasEstimate = await estimateGas(
+			env,
+			poolManagerId,
+			poolManagerIface,
+			adminId,
+			'withdrawCreationFees',
+			[adminId.toSolidityAddress()],
+			500_000,
+		);
+
+		const withdrawResult = await contractExecuteFunction(
+			poolManagerId,
+			poolManagerIface,
+			client,
+			gasEstimate.gasLimit,
+			'withdrawCreationFees',
+			[adminId.toSolidityAddress()],
+		);
+
+		if (withdrawResult[0]?.status?.toString() !== 'SUCCESS') {
+			console.log('withdrawCreationFees FAILED:', withdrawResult);
+			if (withdrawResult[2]) console.log(parseTransactionRecord(withdrawResult[2]));
+			fail('withdrawCreationFees failed');
+		}
+
+		console.log(parseTransactionRecord(withdrawResult[2]));
+
+		await sleep(5000);
+
+		// Verify totalHbarCollected is now 0
+		encodedCommand = poolManagerIface.encodeFunctionData('totalHbarCollected');
+		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const totalHbarAfter = poolManagerIface.decodeFunctionResult('totalHbarCollected', result);
+
+		expect(Number(totalHbarAfter[0])).to.equal(0);
+
+		client.setOperator(operatorId, operatorKey);
+		console.log('✓ Creation fees withdrawn, totalHbarCollected reset to 0');
+	});
+
+	it('Should reject non-admin calling withdrawCreationFees', async function () {
+		console.log('\n-Testing authorization: non-admin cannot withdraw creation fees...');
+
+		client.setOperator(aliceId, alicePK);
+
+		let expectedErrors = 0;
+		let unexpectedErrors = 0;
+
+		try {
+			const result = await contractExecuteFunction(
+				poolManagerId,
+				poolManagerIface,
+				client,
+				500_000,
+				'withdrawCreationFees',
+				[aliceId.toSolidityAddress()],
+			);
+
+			if (result[0]?.status?.toString() !== 'SUCCESS') {
+				expectedErrors++;
+			}
+			else {
+				console.log('Operation succeeded unexpectedly:', parseTransactionRecord(result[2]));
+				unexpectedErrors++;
+			}
+		}
+		catch {
+			expectedErrors++;
+		}
+
+		expect(expectedErrors).to.be.equal(1);
+		expect(unexpectedErrors).to.be.equal(0);
+
+		client.setOperator(operatorId, operatorKey);
+		console.log('✓ Non-admin correctly prevented from withdrawing creation fees');
+	});
+
+	it('Should revert withdrawCreationFees when nothing to withdraw', async function () {
+		console.log('\n-Testing withdrawCreationFees with zero balance...');
+
+		client.setOperator(adminId, adminPK);
+
+		let expectedErrors = 0;
+		let unexpectedErrors = 0;
+
+		try {
+			const result = await contractExecuteFunction(
+				poolManagerId,
+				poolManagerIface,
+				client,
+				500_000,
+				'withdrawCreationFees',
+				[adminId.toSolidityAddress()],
+			);
+
+			if (result[0]?.status?.toString() !== 'SUCCESS') {
+				expectedErrors++;
+			}
+			else {
+				console.log('Operation succeeded unexpectedly:', parseTransactionRecord(result[2]));
+				unexpectedErrors++;
+			}
+		}
+		catch {
+			expectedErrors++;
+		}
+
+		expect(expectedErrors).to.be.equal(1);
+		expect(unexpectedErrors).to.be.equal(0);
+
+		client.setOperator(operatorId, operatorKey);
+		console.log('✓ Correctly reverts with NothingToWithdraw when balance is zero');
+	});
+});
+
+describe('LazyLottoPoolManager - Audit Fix: Rounding Consistency:', function () {
+	it('Should handle proceeds withdrawal without rounding underflow', async function () {
+		console.log('\n-Testing rounding consistency on proceeds withdrawal...');
+
+		// Query pendingWithdrawals for HBAR
+		let encodedCommand = poolManagerIface.encodeFunctionData('pendingWithdrawals', [
+			'0x0000000000000000000000000000000000000000',
+		]);
+		let result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const pendingBefore = poolManagerIface.decodeFunctionResult('pendingWithdrawals', result);
+
+		console.log('pendingWithdrawals (HBAR) before:', pendingBefore[0].toString());
+
+		// Check if Alice's community pool has unwithdrawn proceeds
+		if (testPoolId === null || testPoolId === undefined) {
+			console.log('SKIP: testPoolId not set from previous test');
+			return;
+		}
+
+		encodedCommand = poolManagerIface.encodeFunctionData('getPoolProceeds', [
+			testPoolId,
+			'0x0000000000000000000000000000000000000000',
+		]);
+		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const proceeds = poolManagerIface.decodeFunctionResult('getPoolProceeds', result);
+		const available = Number(proceeds[0]) - Number(proceeds[1]);
+
+		console.log('Pool', testPoolId, 'available proceeds:', available);
+
+		if (available === 0) {
+			// Buy a small entry to generate fresh proceeds
+			console.log('-Buying entry to generate fresh proceeds...');
+			client.setOperator(bobId, bobPK);
+
+			const smallEntryFee = 100_000_000; // 1 HBAR
+			const buyResult = await contractExecuteFunction(
+				lazyLottoId,
+				lazyLottoIface,
+				client,
+				500_000,
+				'buyEntry',
+				[testPoolId, 1],
+				new Hbar(smallEntryFee, HbarUnit.Tinybar),
+			);
+
+			if (buyResult[0]?.status?.toString() !== 'SUCCESS') {
+				console.log('buyEntry FAILED:', buyResult);
+				if (buyResult[2]) console.log(parseTransactionRecord(buyResult[2]));
+				fail('buyEntry failed for rounding test');
+			}
+
+			await sleep(5000);
+			console.log('Entry purchased for rounding test');
+		}
+
+		// Alice withdraws proceeds - the rounding fix ensures this does not revert
+		client.setOperator(aliceId, alicePK);
+
+		const gasEstimate = await estimateGas(
+			env,
+			lazyLottoId,
+			lazyLottoIface,
+			aliceId,
+			'withdrawPoolProceeds',
+			[testPoolId, '0x0000000000000000000000000000000000000000'],
+			500_000,
+		);
+
+		const withdrawResult = await contractExecuteFunction(
+			lazyLottoId,
+			lazyLottoIface,
+			client,
+			gasEstimate.gasLimit,
+			'withdrawPoolProceeds',
+			[testPoolId, '0x0000000000000000000000000000000000000000'],
+		);
+
+		if (withdrawResult[0]?.status?.toString() !== 'SUCCESS') {
+			console.log('withdrawPoolProceeds FAILED:', withdrawResult);
+			if (withdrawResult[2]) console.log(parseTransactionRecord(withdrawResult[2]));
+			fail('withdrawPoolProceeds failed - possible rounding underflow');
+		}
+
+		console.log(parseTransactionRecord(withdrawResult[2]));
+
+		await sleep(5000);
+
+		// Verify pendingWithdrawals decreased
+		encodedCommand = poolManagerIface.encodeFunctionData('pendingWithdrawals', [
+			'0x0000000000000000000000000000000000000000',
+		]);
+		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const pendingAfter = poolManagerIface.decodeFunctionResult('pendingWithdrawals', result);
+
+		console.log('pendingWithdrawals (HBAR) after:', pendingAfter[0].toString());
+		expect(Number(pendingAfter[0])).to.be.lessThan(Number(pendingBefore[0]));
+
+		client.setOperator(operatorId, operatorKey);
+		console.log('✓ Proceeds withdrawal succeeded without rounding underflow');
+	});
+});
+
+describe('LazyLottoPoolManager - Audit Fix: Burn Percentage Freeze:', function () {
+	it('Should verify poolBurnPercentage was frozen at pool creation time', async function () {
+		console.log('\n-Testing burn percentage freeze at pool creation...');
+
+		if (testPoolId === null || testPoolId === undefined) {
+			console.log('ERROR: testPoolId not set from previous test');
+			fail('testPoolId not available');
+		}
+
+		// Query poolBurnPercentage for Alice's community pool
+		let encodedCommand = poolManagerIface.encodeFunctionData('getPoolBurnPercentage', [testPoolId]);
+		let result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const poolBurn = poolManagerIface.decodeFunctionResult('getPoolBurnPercentage', result);
+		const frozenBurnPercent = Number(poolBurn[0]);
+
+		console.log('Pool', testPoolId, 'frozen burn percentage:', frozenBurnPercent);
+
+		// Query LazyLotto's current global burnPercentage
+		encodedCommand = lazyLottoIface.encodeFunctionData('burnPercentage');
+		result = await readOnlyEVMFromMirrorNode(env, lazyLottoId, encodedCommand, operatorId, false);
+		const globalBurn = lazyLottoIface.decodeFunctionResult('burnPercentage', result);
+		const currentGlobalBurn = Number(globalBurn[0]);
+
+		console.log('Current global burnPercentage:', currentGlobalBurn);
+
+		// They should match since burn% hasn't been changed since pool creation
+		expect(frozenBurnPercent).to.equal(currentGlobalBurn);
+
+		console.log('✓ poolBurnPercentage matches global burnPercentage (both', frozenBurnPercent, '%)');
+	});
+
+	it('Should show poolBurnPercentage is independent of global changes', async function () {
+		console.log('\n-Testing burn percentage independence from global changes...');
+
+		if (testPoolId === null || testPoolId === undefined) {
+			console.log('ERROR: testPoolId not set from previous test');
+			fail('testPoolId not available');
+		}
+
+		// Get original global burnPercentage
+		let encodedCommand = lazyLottoIface.encodeFunctionData('burnPercentage');
+		let result = await readOnlyEVMFromMirrorNode(env, lazyLottoId, encodedCommand, operatorId, false);
+		const originalGlobalBurn = lazyLottoIface.decodeFunctionResult('burnPercentage', result);
+		const originalBurnValue = Number(originalGlobalBurn[0]);
+
+		console.log('Original global burnPercentage:', originalBurnValue);
+
+		// Get pool's frozen burnPercentage
+		encodedCommand = poolManagerIface.encodeFunctionData('getPoolBurnPercentage', [testPoolId]);
+		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const poolBurnBefore = poolManagerIface.decodeFunctionResult('getPoolBurnPercentage', result);
+		const frozenBurnPercent = Number(poolBurnBefore[0]);
+
+		// Admin changes global burnPercentage to a different value
+		const newGlobalBurn = originalBurnValue === 10 ? 20 : 10;
+
+		client.setOperator(adminId, adminPK);
+
+		const gasEstimate = await estimateGas(
+			env,
+			lazyLottoId,
+			lazyLottoIface,
+			adminId,
+			'setBurnPercentage',
+			[newGlobalBurn],
+			300_000,
+		);
+
+		const setBurnResult = await contractExecuteFunction(
+			lazyLottoId,
+			lazyLottoIface,
+			client,
+			gasEstimate.gasLimit,
+			'setBurnPercentage',
+			[newGlobalBurn],
+		);
+
+		if (setBurnResult[0]?.status?.toString() !== 'SUCCESS') {
+			console.log('setBurnPercentage FAILED:', setBurnResult);
+			if (setBurnResult[2]) console.log(parseTransactionRecord(setBurnResult[2]));
+			fail('setBurnPercentage failed');
+		}
+
+		await sleep(5000);
+
+		// Verify global changed
+		encodedCommand = lazyLottoIface.encodeFunctionData('burnPercentage');
+		result = await readOnlyEVMFromMirrorNode(env, lazyLottoId, encodedCommand, operatorId, false);
+		const changedGlobalBurn = lazyLottoIface.decodeFunctionResult('burnPercentage', result);
+		expect(Number(changedGlobalBurn[0])).to.equal(newGlobalBurn);
+
+		console.log('Global burnPercentage changed to:', newGlobalBurn);
+
+		// Verify pool's frozen burn percentage is STILL the original value
+		encodedCommand = poolManagerIface.encodeFunctionData('getPoolBurnPercentage', [testPoolId]);
+		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const poolBurnAfter = poolManagerIface.decodeFunctionResult('getPoolBurnPercentage', result);
+
+		expect(Number(poolBurnAfter[0])).to.equal(frozenBurnPercent);
+		console.log('Pool', testPoolId, 'burn percentage still:', frozenBurnPercent, '(unchanged)');
+
+		// Reset global burnPercentage back to original
+		const resetEstimate = await estimateGas(
+			env,
+			lazyLottoId,
+			lazyLottoIface,
+			adminId,
+			'setBurnPercentage',
+			[originalBurnValue],
+			300_000,
+		);
+
+		const resetResult = await contractExecuteFunction(
+			lazyLottoId,
+			lazyLottoIface,
+			client,
+			resetEstimate.gasLimit,
+			'setBurnPercentage',
+			[originalBurnValue],
+		);
+
+		if (resetResult[0]?.status?.toString() !== 'SUCCESS') {
+			console.log('Reset setBurnPercentage FAILED:', resetResult);
+			if (resetResult[2]) console.log(parseTransactionRecord(resetResult[2]));
+			fail('Reset setBurnPercentage failed');
+		}
+
+		await sleep(5000);
+
+		// Verify reset
+		encodedCommand = lazyLottoIface.encodeFunctionData('burnPercentage');
+		result = await readOnlyEVMFromMirrorNode(env, lazyLottoId, encodedCommand, operatorId, false);
+		const resetGlobalBurn = lazyLottoIface.decodeFunctionResult('burnPercentage', result);
+		expect(Number(resetGlobalBurn[0])).to.equal(originalBurnValue);
+
+		client.setOperator(operatorId, operatorKey);
+		console.log('✓ Pool burn percentage is independent of global changes, global reset to', originalBurnValue);
+	});
+});
+
+describe('LazyLottoPoolManager - Audit Fix: pendingWithdrawals Global Pool Fix:', function () {
+	let auditGlobalPoolId;
+	const AUDIT_ENTRY_FEE = 100_000_000; // 1 HBAR
+
+	it('Should create a global pool and buy entry for pendingWithdrawals test', async function () {
+		console.log('\n-Setting up global pool for pendingWithdrawals audit test...');
+
+		client.setOperator(adminId, adminPK);
+
+		const tokenCreationCost = Number(new Hbar(20, HbarUnit.Hbar).toTinybars());
+
+		const createResult = await contractExecuteFunction(
+			lazyLottoId,
+			lazyLottoIface,
+			client,
+			5_000_000,
+			'createPool',
+			[
+				'Audit PW Test Pool',
+				'APT',
+				'Pool for pendingWithdrawals audit fix test',
+				[],
+				'QmAuditPWTicketCID',
+				'QmAuditPWWinCID',
+				50_000_000,
+				AUDIT_ENTRY_FEE,
+				'0x0000000000000000000000000000000000000000',
+			],
+			new Hbar(tokenCreationCost, HbarUnit.Tinybar),
+		);
+
+		if (createResult[0]?.status?.toString() !== 'SUCCESS') {
+			console.log('Global pool creation FAILED:', createResult);
+			if (createResult[2]) console.log(parseTransactionRecord(createResult[2]));
+			fail('Global pool creation failed for audit test');
+		}
+
+		auditGlobalPoolId = Number(createResult[1][0]);
+		console.log('Created global pool:', auditGlobalPoolId);
+		await sleep(5000);
+
+		// Verify it's a global pool
+		let encodedCommand = poolManagerIface.encodeFunctionData('isGlobalPool', [auditGlobalPoolId]);
+		let result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const isGlobal = poolManagerIface.decodeFunctionResult('isGlobalPool', result);
+		expect(isGlobal[0]).to.equal(true);
+
+		// Bob buys 1 entry
+		client.setOperator(bobId, bobPK);
+
+		// Associate pool ticket token
+		encodedCommand = lazyLottoIface.encodeFunctionData('getPoolBasicInfo', [auditGlobalPoolId]);
+		result = await readOnlyEVMFromMirrorNode(env, lazyLottoId, encodedCommand, operatorId, false);
+		const poolDetails = lazyLottoIface.decodeFunctionResult('getPoolBasicInfo', result);
+		const poolTokenId = TokenId.fromSolidityAddress(poolDetails[6]);
+
+		try {
+			const assocResult = await associateTokensToAccount(client, bobId, bobPK, [poolTokenId]);
+			expect(assocResult).to.equal('SUCCESS');
+		}
+		catch (e) {
+			// Token may already be associated from prior tests
+			console.log('Token association skipped (may already be associated):', e.message);
+		}
+
+		const buyResult = await contractExecuteFunction(
+			lazyLottoId,
+			lazyLottoIface,
+			client,
+			500_000,
+			'buyEntry',
+			[auditGlobalPoolId, 1],
+			new Hbar(AUDIT_ENTRY_FEE, HbarUnit.Tinybar),
+		);
+
+		if (buyResult[0]?.status?.toString() !== 'SUCCESS') {
+			console.log('buyEntry FAILED:', buyResult);
+			if (buyResult[2]) console.log(parseTransactionRecord(buyResult[2]));
+			fail('buyEntry failed for audit test');
+		}
+
+		console.log('Bob purchased 1 entry');
+		await sleep(5000);
+
+		client.setOperator(operatorId, operatorKey);
+		console.log('✓ Global pool created and entry purchased for pendingWithdrawals test');
+	});
+
+	it('Should verify pendingWithdrawals decrements after global pool withdrawal', async function () {
+		console.log('\n-Testing pendingWithdrawals decrement on global pool withdrawal...');
+
+		// Query pendingWithdrawals for HBAR before withdrawal
+		let encodedCommand = poolManagerIface.encodeFunctionData('pendingWithdrawals', [
+			'0x0000000000000000000000000000000000000000',
+		]);
+		let result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const pendingBefore = poolManagerIface.decodeFunctionResult('pendingWithdrawals', result);
+		const pendingBeforeValue = Number(pendingBefore[0]);
+
+		console.log('pendingWithdrawals (HBAR) before:', pendingBeforeValue);
+
+		// Query pool proceeds to know how much will be withdrawn
+		encodedCommand = poolManagerIface.encodeFunctionData('getPoolProceeds', [
+			auditGlobalPoolId,
+			'0x0000000000000000000000000000000000000000',
+		]);
+		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const proceeds = poolManagerIface.decodeFunctionResult('getPoolProceeds', result);
+		const availableAmount = Number(proceeds[0]) - Number(proceeds[1]);
+
+		console.log('Available proceeds for global pool', auditGlobalPoolId, ':', availableAmount);
+		expect(availableAmount).to.be.greaterThan(0);
+
+		// Admin withdraws global pool proceeds
+		client.setOperator(adminId, adminPK);
+
+		const gasEstimate = await estimateGas(
+			env,
+			lazyLottoId,
+			lazyLottoIface,
+			adminId,
+			'withdrawGlobalPoolProceeds',
+			[auditGlobalPoolId, '0x0000000000000000000000000000000000000000'],
+			500_000,
+		);
+
+		const withdrawResult = await contractExecuteFunction(
+			lazyLottoId,
+			lazyLottoIface,
+			client,
+			gasEstimate.gasLimit,
+			'withdrawGlobalPoolProceeds',
+			[auditGlobalPoolId, '0x0000000000000000000000000000000000000000'],
+		);
+
+		if (withdrawResult[0]?.status?.toString() !== 'SUCCESS') {
+			console.log('withdrawGlobalPoolProceeds FAILED:', withdrawResult);
+			if (withdrawResult[2]) console.log(parseTransactionRecord(withdrawResult[2]));
+			fail('withdrawGlobalPoolProceeds failed for audit test');
+		}
+
+		console.log(parseTransactionRecord(withdrawResult[2]));
+
+		await sleep(5000);
+
+		// Query pendingWithdrawals for HBAR after withdrawal
+		encodedCommand = poolManagerIface.encodeFunctionData('pendingWithdrawals', [
+			'0x0000000000000000000000000000000000000000',
+		]);
+		result = await readOnlyEVMFromMirrorNode(env, poolManagerId, encodedCommand, operatorId, false);
+		const pendingAfter = poolManagerIface.decodeFunctionResult('pendingWithdrawals', result);
+		const pendingAfterValue = Number(pendingAfter[0]);
+
+		console.log('pendingWithdrawals (HBAR) after:', pendingAfterValue);
+
+		// pendingWithdrawals should have decreased by the withdrawn amount
+		const decrease = pendingBeforeValue - pendingAfterValue;
+		console.log('pendingWithdrawals decreased by:', decrease);
+
+		expect(decrease).to.equal(availableAmount);
+		expect(pendingAfterValue).to.be.lessThan(pendingBeforeValue);
+
+		client.setOperator(operatorId, operatorKey);
+		console.log('✓ pendingWithdrawals correctly decremented by', decrease, 'after global pool withdrawal');
 	});
 });
 

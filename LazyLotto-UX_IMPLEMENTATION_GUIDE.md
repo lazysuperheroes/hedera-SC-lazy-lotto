@@ -300,7 +300,7 @@ redeemPrizeToNFT(indices) → int64[]
 
 // Community pool management (called on LazyLotto)
 createPool(name, symbol, memo, royalties, ticketCID, winCID, winRate, entryFee, feeToken) payable → uint256
-addPrizePackage(poolId, token, amount, nftTokens, nftSerials) payable
+addPrizePackage(poolId, token, amount, nftTokens, nftSerials) payable  // Fee-on-transfer: actual received amount is stored
 pausePool(poolId)
 unpausePool(poolId)
 closePool(poolId)
@@ -1884,6 +1884,8 @@ async function getPoolManagementPermissions(poolId, userAddress) {
 ```
 
 **Add Prizes to Your Pool:**
+
+> **Note:** Fee-on-transfer tokens (HTS tokens with custom fractional transfer fees) are supported. The system tracks actual received amounts after fees, so prize values will reflect the post-fee amount rather than the requested amount.
 
 ```javascript
 async function addPrizeToPool(poolId, {

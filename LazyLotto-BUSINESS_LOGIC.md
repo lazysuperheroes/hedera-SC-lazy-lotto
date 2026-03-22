@@ -47,6 +47,8 @@ Prizes are managed through a sophisticated system that supports:
 - **Pending Prizes**: Won prizes awaiting claim
 - **Prize NFTs**: Prizes can be converted to NFTs for trading before claiming
 
+> **Note:** Fee-on-transfer tokens (HTS tokens with custom fractional transfer fees) are supported. Prize amounts and proceeds are tracked by actual received amount after fees, so pool creators should be aware that prizes will reflect the post-fee amount.
+
 ### 4. Boost System
 Users can receive win rate bonuses through:
 - **Time-Based Bonuses**: Active during specific time windows

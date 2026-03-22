@@ -184,6 +184,8 @@ Pools can offer three types of prizes, combined in any way:
 
 Won prizes can be claimed directly or converted to tradeable "Prize NFTs" via `redeemPrizeToNFT()` — letting winners sell their prizes before claiming the underlying assets.
 
+> **Note:** Fee-on-transfer tokens (HTS tokens with custom fractional transfer fees) are supported. Prize amounts and proceeds are tracked by actual received amount after fees, so pool creators should be aware that prizes added with such tokens will reflect the post-fee amount.
+
 ### Win Rate & Boosts
 
 Each pool has a base **win rate** (e.g., 1 in 10 chance). Players can boost their odds through:
