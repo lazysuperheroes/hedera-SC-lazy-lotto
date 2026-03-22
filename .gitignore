@@ -29,3 +29,12 @@ docs/*
 
 # Temporary deployment state files
 scripts/deployments/deployment-*.json
+scripts/deployments/generateExtraPrizes.js
+
+# Prize batch files and old contract data (contain serials, amounts, contract-specific data)
+prizes-*.json
+old_contract_prizes.json
+all_prizes.json
+
+# Internal strategy documents
+POOL_STRATEGY.md
