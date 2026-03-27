@@ -1,0 +1,93 @@
+{
+  "_description": "LAZY Lounge Stage 1 — 100 prizes, 150 LAZY entry, 15% win rate (from POOL_STRATEGY.md)",
+  "_notes": [
+    "Free-roll tickets: mint via buyAndRedeemEntry.js, fill serials below",
+    "NFT prizes: fill token addresses and serials from your wallet",
+    "HBAR amounts are in whole HBAR (e.g. '50' = 50 HBAR)",
+    "Generate output: node generatePrizeConfig.js -f recipes/lazyLounge-stage1.json"
+  ],
+  "poolId": 0,
+  "inventory": {
+    "ticket": {
+      "token": "0.0.XXXXXX",
+      "_note": "Pool ticket NFT collection — get from buyAndRedeemEntry.js output or getPoolBasicInfo()",
+      "serials": []
+    },
+    "mutant": {
+      "token": "0.0.XXXXXX",
+      "_note": "LSH Gen1 Mutant collection",
+      "serials": []
+    },
+    "gen2": {
+      "token": "0.0.XXXXXX",
+      "_note": "LSH Gen2 collection",
+      "serials": []
+    },
+    "utility": {
+      "token": "0.0.XXXXXX",
+      "_note": "Utility NFT collection (e.g. 0.0.8020755 or 0.0.8221452)",
+      "serials": []
+    }
+  },
+  "tiers": [
+    {
+      "name": "Jackpot",
+      "count": 1,
+      "hbar": "500",
+      "nfts": [{"label": "mutant", "perPrize": 1}]
+    },
+    {
+      "name": "Premium",
+      "count": 2,
+      "hbar": "200",
+      "nfts": [{"label": "gen2", "perPrize": 1}]
+    },
+    {
+      "name": "Elite",
+      "count": 3,
+      "hbar": "100",
+      "nfts": [{"label": "utility", "perPrize": 1}]
+    },
+    {
+      "name": "Great",
+      "count": 5,
+      "hbar": "50",
+      "nfts": [{"label": "ticket", "perPrize": 1}]
+    },
+    {
+      "name": "Good",
+      "count": 10,
+      "hbar": "25",
+      "nfts": [{"label": "ticket", "perPrize": 1}]
+    },
+    {
+      "name": "Decent",
+      "count": 15,
+      "hbar": "10",
+      "nfts": [{"label": "ticket", "perPrize": 1}]
+    },
+    {
+      "name": "Small",
+      "count": 15,
+      "hbar": "5",
+      "nfts": [{"label": "ticket", "perPrize": 2}]
+    },
+    {
+      "name": "Consolation",
+      "count": 20,
+      "hbar": "3",
+      "nfts": [{"label": "ticket", "perPrize": 2}]
+    },
+    {
+      "name": "Mini",
+      "count": 15,
+      "hbar": "1",
+      "nfts": [{"label": "ticket", "perPrize": 1}]
+    },
+    {
+      "name": "Free spin",
+      "count": 14,
+      "nfts": [{"label": "ticket", "perPrize": 3}]
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "_description": "Lucky Dip — 50 prizes (initial deploy), 10 HBAR entry, 20% win rate (from POOL_STRATEGY.md)",
+  "_notes": [
+    "LAZY consolation prizes funnel players to LAZY Lounge (150 LAZY = one full entry)",
+    "HBAR amounts are in whole HBAR",
+    "FT amounts are human-readable (e.g. '150' = 150 LAZY at 1 decimal)"
+  ],
+  "poolId": 0,
+  "inventory": {
+    "lazy": {
+      "token": "0.0.XXXXXX",
+      "_note": "$LAZY token — set LAZY_TOKEN_ID from .env"
+    },
+    "gen2": {
+      "token": "0.0.XXXXXX",
+      "_note": "LSH Gen2 collection",
+      "serials": []
+    },
+    "utility": {
+      "token": "0.0.XXXXXX",
+      "_note": "Utility NFT collection",
+      "serials": []
+    }
+  },
+  "tiers": [
+    {
+      "name": "HBAR consolation",
+      "count": 15,
+      "hbar": "5"
+    },
+    {
+      "name": "LAZY consolation",
+      "count": 4,
+      "ft": {"label": "lazy", "amount": "150"}
+    },
+    {
+      "name": "Decent",
+      "count": 11,
+      "hbar": {"min": "10", "max": "15"}
+    },
+    {
+      "name": "Good",
+      "count": 7,
+      "hbar": {"min": "20", "max": "40"}
+    },
+    {
+      "name": "Great",
+      "count": 4,
+      "hbar": {"min": "50", "max": "100"}
+    },
+    {
+      "name": "Excellent",
+      "count": 2,
+      "hbar": {"min": "100", "max": "200"},
+      "nfts": [{"label": "utility", "perPrize": 1}]
+    },
+    {
+      "name": "Rare",
+      "count": 2,
+      "hbar": {"min": "200", "max": "300"},
+      "nfts": [{"label": "utility", "perPrize": 1}]
+    },
+    {
+      "name": "Elite",
+      "count": 2,
+      "hbar": "250",
+      "nfts": [{"label": "utility", "perPrize": 1}]
+    },
+    {
+      "name": "Premium",
+      "count": 2,
+      "hbar": "300",
+      "nfts": [{"label": "gen2", "perPrize": 1}]
+    },
+    {
+      "name": "Jackpot",
+      "count": 1,
+      "hbar": "500",
+      "nfts": [{"label": "gen2", "perPrize": 1}, {"label": "utility", "perPrize": 1}]
+    }
+  ]
+}

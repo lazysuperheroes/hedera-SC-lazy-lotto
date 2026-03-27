@@ -6,8 +6,9 @@ This folder contains interaction scripts for all contracts in the LazyLotto proj
 
 ```
 scripts/interactions/
-├── LazyLotto/                  # Complete lottery game system (22 scripts)
-│   ├── admin/                  # Pool management, roles, configuration (9 scripts)
+├── LazyLotto/                  # Complete lottery game system (24 scripts)
+│   ├── admin/                  # Pool management, roles, configuration, prize tools (11 scripts)
+│   │   └── recipes/           # Prize config templates for generatePrizeConfig.js
 │   ├── queries/                # Contract state and user info queries (3 scripts)
 │   ├── user/                   # Player interactions - buy, roll, claim (8 scripts)
 │   ├── README.md              # Detailed game mechanics and script guide
@@ -48,7 +49,7 @@ scripts/interactions/
 - Role-based access control (OWNER, MANAGER, OPERATIONAL)
 
 **Script Categories**:
-- **Admin** (9): Pool creation, prize management, pause/unpause, roles, bonuses
+- **Admin** (11): Pool creation, prize management, pause/unpause, roles, bonuses, prize config tools
 - **Queries** (3): Master info, pool info, user state
 - **User** (8): Buy entries, roll tickets, claim prizes, redeem to NFTs
 
@@ -143,13 +144,13 @@ scripts/interactions/
 
 | Contract | Total Scripts | Complete | Pending | Progress |
 |----------|--------------|----------|---------|----------|
-| **LazyLotto** | 22 | 22 | 0 | ✅ 100% |
+| **LazyLotto** | 24 | 24 | 0 | ✅ 100% |
 | **LazyTradeLotto** | 15 | 12 | 3 | 🔄 80% |
 | **LazySecureTrade** | 3 | 3 | 0 | ✅ 100% |
 | **LazyDelegateRegistry** | 2 | 2 | 0 | ✅ 100% |
 | **LazyGasStation** | 1 | 1 | 0 | ✅ 100% |
 | **Utilities** | 1 | 1 | 0 | ✅ 100% |
-| **TOTAL** | **44** | **41** | **3** | **93%** |
+| **TOTAL** | **46** | **43** | **3** | **93%** |
 
 ### Remaining Work
 - [ ] LazyTradeLotto testing scripts (3):
@@ -249,10 +250,11 @@ node LazyTradeLotto/admin/boostJackpot.js 0.0.123456 1000 --multisig --threshold
 
 ### Supported Scripts
 
-**LazyLotto (9 admin scripts):**
+**LazyLotto (11 admin scripts):**
 - `createPool.js`, `closePool.js`, `pauseContract.js`, `unpausePool.js`
 - `setPlatformFee.js`, `setBonuses.js`, `setCreationFees.js`
 - `addGlobalPrizeManager.js`, `withdrawTokens.js`
+- `approveNFTsToStorage.js`, `generatePrizeConfig.js`
 
 **LazyTradeLotto (8 admin scripts):**
 - `boostJackpot.js`, `pauseLottoContract.js`, `unpauseLottoContract.js`
@@ -266,6 +268,112 @@ For complete multi-sig documentation, see:
 - **User Guide**: `docs/MULTISIG_USER_GUIDE.md`
 - **Security Guide**: `docs/MULTISIG_SECURITY.md`
 - **Developer Guide**: `docs/MULTISIG_DEVELOPER_GUIDE.md`
+
+---
+
+## 🎰 Prize Configuration Workflow
+
+LazyLotto includes a recipe-based system for defining, generating, and uploading prize packages. This supports the free-roll ticket mechanism where admin-minted NFT tickets are packaged alongside HBAR/NFT prizes.
+
+### Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `buyAndRedeemEntry.js` | Mint free-roll NFT tickets (admin creates free entries → auto-redeemed to tradeable NFT tickets) |
+| `generatePrizeConfig.js` | Transform a recipe file into batch-upload JSON |
+| `approveNFTsToStorage.js` | Verify/set NFT collection approvals to LazyLottoStorage |
+| `addPrizesBatch.js` | Upload prize packages to contract (handles approvals automatically) |
+
+### Recipe Format
+
+Recipes define prize tiers and NFT inventory in a single JSON file. Templates are in `LazyLotto/admin/recipes/`:
+
+```json
+{
+  "poolId": 0,
+  "inventory": {
+    "ticket": {"token": "0.0.POOL_TOKEN", "serials": [1, 2, 3, ...]},
+    "gen2":   {"token": "0.0.GEN2_TOKEN", "serials": [42, 55]},
+    "mutant": {"token": "0.0.MUTANT_TOKEN", "serials": [7]},
+    "utility": {"token": "0.0.UTILITY_TOKEN", "serials": [10, 11, 12]},
+    "lazy":   {"token": "0.0.LAZY_TOKEN"}
+  },
+  "tiers": [
+    {"name": "Jackpot", "count": 1, "hbar": "500", "nfts": [{"label": "mutant", "perPrize": 1}]},
+    {"name": "Great",   "count": 5, "hbar": "50",  "nfts": [{"label": "ticket", "perPrize": 1}]},
+    {"name": "Decent",  "count": 10, "hbar": {"min": "10", "max": "25"}},
+    {"name": "LAZY consolation", "count": 4, "ft": {"label": "lazy", "amount": "150"}}
+  ]
+}
+```
+
+**Key features:**
+- **NFT inventory** — define token addresses and available serials once; the generator assigns them across tiers automatically
+- **HBAR ranges** — `{"min": "10", "max": "25"}` randomizes amounts within a range
+- **Free-roll tickets** — pool ticket NFTs (from `buyAndRedeemEntry.js`) are referenced as `"label": "ticket"` and packaged alongside HBAR
+- **FT prizes** — fungible tokens like $LAZY use `"ft"` with a label referencing inventory
+- **Multi-collection packages** — a single tier can bundle NFTs from multiple collections
+
+### Complete Workflow
+
+**Step 1: Mint free-roll tickets** (for pools using the ticket mechanism)
+```bash
+node LazyLotto/admin/buyAndRedeemEntry.js
+# → Enter pool ID and ticket count
+# → Note the serial numbers from output (e.g. serials: 1, 2, 3, ..., 157)
+```
+
+**Step 2: Prepare recipe**
+```bash
+# Copy a template
+cp LazyLotto/admin/recipes/lazyLounge-stage1.json my-prizes.json
+
+# Edit: fill in poolId, token addresses, and serial numbers
+```
+
+**Step 3: Validate recipe**
+```bash
+node LazyLotto/admin/generatePrizeConfig.js -f my-prizes.json -dry
+# Validates inventory, checks serial counts, shows summary — no file written
+```
+
+**Step 4: Generate batch JSON**
+```bash
+node LazyLotto/admin/generatePrizeConfig.js -f my-prizes.json
+# Outputs: prizes-pool0-my-prizes.json (compatible with addPrizesBatch.js)
+
+# Optional flags:
+#   -o custom-output.json    Custom output filename
+#   -shuffle                 Randomize serial assignment order
+```
+
+**Step 5: Upload to contract**
+```bash
+# Dry run (validates ownership, balances, allowances)
+node LazyLotto/admin/addPrizesBatch.js -f prizes-pool0-my-prizes.json -dry
+
+# Live upload (sets allowances automatically, submits packages one by one)
+node LazyLotto/admin/addPrizesBatch.js -f prizes-pool0-my-prizes.json
+```
+
+### Available Recipe Templates
+
+| Template | Pool | Prizes | Description |
+|----------|------|--------|-------------|
+| `lazyLounge-stage1.json` | LAZY Lounge | 100 | 150 LAZY entry, HBAR + free-roll tickets, net LAZY burner |
+| `luckyDip-initial.json` | Lucky Dip | 50 | 10 HBAR entry, HBAR ranges, LAZY consolations, Gen2 jackpot |
+
+### Checking Approvals Independently
+
+```bash
+# Check if collections are approved to storage
+node LazyLotto/admin/approveNFTsToStorage.js -tokens 0.0.12345,0.0.67890 -check
+
+# Set approvals (interactive)
+node LazyLotto/admin/approveNFTsToStorage.js
+```
+
+Note: `addPrizesBatch.js` handles approvals automatically during upload. The standalone script is useful for verification or pre-setup.
 
 ---
 
@@ -359,4 +467,4 @@ For issues or questions:
 
 ---
 
-**Last Updated**: Migration completed - All scripts organized by contract (v1.0.0)
+**Last Updated**: Added prize config generator, NFT approval tool, and recipe templates (v1.1.0)
