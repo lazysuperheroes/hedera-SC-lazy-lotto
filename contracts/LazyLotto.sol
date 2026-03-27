@@ -179,6 +179,7 @@ contract LazyLotto is ReentrancyGuard, Pausable {
         uint256 rollBps
     );
     event PrizeClaimed(address indexed user, PrizePackage prize);
+    event PrizeTransferred(address indexed from, address indexed to);
     event TicketEvent(
         uint256 indexed poolId,
         address indexed tokenId,
@@ -970,6 +971,39 @@ contract LazyLotto is ReentrancyGuard, Pausable {
         while (pending[msg.sender].length > 0) {
             _claimPrize(0);
         }
+    }
+
+    /// @notice Transfer pending prizes to another wallet (in-memory only, no token transfers)
+    /// @dev The recipient claims via the standard claimPrize/claimAllPrizes flow.
+    ///      Pass type(uint256).max as pkgIdx to transfer ALL pending prizes.
+    /// @param recipient The wallet to receive the pending prize(s)
+    /// @param pkgIdx Index of a single prize, or type(uint256).max for all
+    function transferPendingPrizes(
+        address recipient,
+        uint256 pkgIdx
+    ) external nonReentrant {
+        if (recipient == address(0) || recipient == msg.sender)
+            revert BadParameters();
+        uint256 len = pending[msg.sender].length;
+        if (len == 0) revert NoPendingPrizes();
+
+        if (pkgIdx == type(uint256).max) {
+            // Transfer all
+            for (uint256 i; i < len; ) {
+                pending[recipient].push(pending[msg.sender][i]);
+                unchecked {
+                    ++i;
+                }
+            }
+            delete pending[msg.sender];
+        } else {
+            if (pkgIdx >= len) revert BadParameters();
+            pending[recipient].push(pending[msg.sender][pkgIdx]);
+            pending[msg.sender][pkgIdx] = pending[msg.sender][len - 1];
+            pending[msg.sender].pop();
+        }
+
+        emit PrizeTransferred(msg.sender, recipient);
     }
 
     /// --- VIEWS (Getters) ---

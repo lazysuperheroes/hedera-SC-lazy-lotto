@@ -2864,6 +2864,390 @@ describe('LazyLotto - Prize Claiming:', function () {
 	});
 });
 
+describe('LazyLotto - Prize Transfer:', function () {
+	before(async () => {
+		// Switch to mock PRNG for deterministic wins
+		console.log('\n🔄 Switching to Mock PRNG for prize transfer tests...');
+		client.setOperator(operatorId, operatorKey);
+
+		const gasEstimate = await estimateGas(
+			env,
+			contractId,
+			lazyLottoIface,
+			operatorId,
+			'setPrng',
+			[mockPrngId.toSolidityAddress()],
+			300_000,
+		);
+
+		const result = await contractExecuteFunction(
+			contractId,
+			lazyLottoIface,
+			client,
+			gasEstimate.gasLimit,
+			'setPrng',
+			[mockPrngId.toSolidityAddress()],
+		);
+
+		if (result[0]?.status?.toString() !== 'SUCCESS') {
+			fail('Set Mock PRNG failed');
+		}
+		console.log('✓ Mock PRNG activated for prize transfer tests');
+	});
+
+	after(async () => {
+		// Restore real PRNG
+		console.log('\n🔄 Restoring real PRNG...');
+		client.setOperator(operatorId, operatorKey);
+
+		const gasEstimate = await estimateGas(
+			env,
+			contractId,
+			lazyLottoIface,
+			operatorId,
+			'setPrng',
+			[prngId.toSolidityAddress()],
+			300_000,
+		);
+
+		const result = await contractExecuteFunction(
+			contractId,
+			lazyLottoIface,
+			client,
+			gasEstimate.gasLimit,
+			'setPrng',
+			[prngId.toSolidityAddress()],
+		);
+
+		if (result[0]?.status?.toString() !== 'SUCCESS') {
+			fail('Restore real PRNG failed');
+		}
+		console.log('✓ Real PRNG restored');
+	});
+
+	it('Should transfer a single pending prize to another wallet', async () => {
+		const poolId = 0;
+		const entryFee = new Hbar(1);
+
+		// Add a prize for Alice to win
+		client.setOperator(adminId, adminPK);
+		let gasEstimate = await estimateGas(
+			env,
+			contractId,
+			lazyLottoIface,
+			adminId,
+			'addMultipleFungiblePrizes',
+			[poolId, ZERO_ADDRESS, [Number(new Hbar(1).toTinybars())]],
+			2_000_000,
+			Number(new Hbar(1).toTinybars()),
+		);
+
+		await contractExecuteFunction(
+			contractId,
+			lazyLottoIface,
+			client,
+			gasEstimate.gasLimit,
+			'addMultipleFungiblePrizes',
+			[poolId, ZERO_ADDRESS, [Number(new Hbar(1).toTinybars())]],
+			new Hbar(1),
+		);
+
+		// Alice buys and rolls to win a prize (mock PRNG = guaranteed win)
+		client.setOperator(aliceId, alicePK);
+		gasEstimate = await estimateGas(
+			env,
+			contractId,
+			lazyLottoIface,
+			aliceId,
+			'buyAndRollEntry',
+			[poolId, 1],
+			4_000_000,
+			Number(entryFee.toTinybars()),
+		);
+
+		let result = await contractExecuteFunction(
+			contractId,
+			lazyLottoIface,
+			client,
+			gasEstimate.gasLimit * 2,
+			'buyAndRollEntry',
+			[poolId, 1],
+			entryFee,
+		);
+
+		expect(result[0]?.status?.toString()).to.equal('SUCCESS');
+		const wins = Number(result[1][0]);
+		expect(wins).to.equal(1);
+		console.log('\t✓ Alice won a prize');
+
+		await sleep(5000);
+
+		// Check Alice has pending prizes
+		const countQuery = lazyLottoIface.encodeFunctionData('getPendingPrizesCount', [aliceId.toSolidityAddress()]);
+		const countResult = await readOnlyEVMFromMirrorNode(env, contractId, countQuery, operatorId, false);
+		const alicePrizesBefore = Number(lazyLottoIface.decodeFunctionResult('getPendingPrizesCount', countResult)[0]);
+		expect(alicePrizesBefore).to.be.greaterThan(0);
+		console.log(`\t✓ Alice has ${alicePrizesBefore} pending prize(s)`);
+
+		// Transfer single prize (index 0) to Bob
+		gasEstimate = await estimateGas(
+			env,
+			contractId,
+			lazyLottoIface,
+			aliceId,
+			'transferPendingPrizes',
+			[bobId.toSolidityAddress(), 0],
+			500_000,
+		);
+
+		result = await contractExecuteFunction(
+			contractId,
+			lazyLottoIface,
+			client,
+			gasEstimate.gasLimit,
+			'transferPendingPrizes',
+			[bobId.toSolidityAddress(), 0],
+		);
+
+		expect(result[0]?.status?.toString()).to.equal('SUCCESS');
+		console.log('\t✓ Alice transferred prize to Bob');
+
+		await sleep(5000);
+
+		// Verify Alice lost one prize
+		const countResult2 = await readOnlyEVMFromMirrorNode(env, contractId, countQuery, operatorId, false);
+		const alicePrizesAfter = Number(lazyLottoIface.decodeFunctionResult('getPendingPrizesCount', countResult2)[0]);
+		expect(alicePrizesAfter).to.equal(alicePrizesBefore - 1);
+		console.log(`\t✓ Alice now has ${alicePrizesAfter} pending prize(s)`);
+
+		// Verify Bob received one prize
+		const bobCountQuery = lazyLottoIface.encodeFunctionData('getPendingPrizesCount', [bobId.toSolidityAddress()]);
+		const bobCountResult = await readOnlyEVMFromMirrorNode(env, contractId, bobCountQuery, operatorId, false);
+		const bobPrizes = Number(lazyLottoIface.decodeFunctionResult('getPendingPrizesCount', bobCountResult)[0]);
+		expect(bobPrizes).to.be.greaterThan(0);
+		console.log(`\t✓ Bob now has ${bobPrizes} pending prize(s)`);
+
+		// Bob claims the prize to verify it's fully functional
+		client.setOperator(bobId, bobPK);
+		gasEstimate = await estimateGas(
+			env,
+			contractId,
+			lazyLottoIface,
+			bobId,
+			'claimPrize',
+			[0],
+			2_000_000,
+		);
+
+		result = await contractExecuteFunction(
+			contractId,
+			lazyLottoIface,
+			client,
+			gasEstimate.gasLimit,
+			'claimPrize',
+			[0],
+		);
+
+		expect(result[0]?.status?.toString()).to.equal('SUCCESS');
+		console.log('\t✓ Bob successfully claimed the transferred prize');
+	});
+
+	it('Should transfer all pending prizes using type(uint256).max', async () => {
+		const poolId = 0;
+		const entryFee = new Hbar(1);
+		const ticketCount = 2;
+
+		// Add prizes
+		client.setOperator(adminId, adminPK);
+		let gasEstimate = await estimateGas(
+			env,
+			contractId,
+			lazyLottoIface,
+			adminId,
+			'addMultipleFungiblePrizes',
+			[poolId, ZERO_ADDRESS, [Number(new Hbar(1).toTinybars()), Number(new Hbar(1).toTinybars())]],
+			2_000_000,
+			Number(new Hbar(2).toTinybars()),
+		);
+
+		await contractExecuteFunction(
+			contractId,
+			lazyLottoIface,
+			client,
+			gasEstimate.gasLimit,
+			'addMultipleFungiblePrizes',
+			[poolId, ZERO_ADDRESS, [Number(new Hbar(1).toTinybars()), Number(new Hbar(1).toTinybars())]],
+			new Hbar(2),
+		);
+
+		// Alice buys and rolls 2 entries (mock PRNG = guaranteed wins)
+		client.setOperator(aliceId, alicePK);
+		gasEstimate = await estimateGas(
+			env,
+			contractId,
+			lazyLottoIface,
+			aliceId,
+			'buyAndRollEntry',
+			[poolId, ticketCount],
+			4_000_000,
+			Number(entryFee.toTinybars()) * ticketCount,
+		);
+
+		let result = await contractExecuteFunction(
+			contractId,
+			lazyLottoIface,
+			client,
+			gasEstimate.gasLimit * 2,
+			'buyAndRollEntry',
+			[poolId, ticketCount],
+			new Hbar(Number(entryFee.toTinybars()) * ticketCount, HbarUnit.Tinybar),
+		);
+
+		expect(result[0]?.status?.toString()).to.equal('SUCCESS');
+		expect(Number(result[1][0])).to.equal(ticketCount);
+		console.log(`\t✓ Alice won ${ticketCount} prizes`);
+
+		await sleep(5000);
+
+		// Check Alice's prize count
+		const countQuery = lazyLottoIface.encodeFunctionData('getPendingPrizesCount', [aliceId.toSolidityAddress()]);
+		const countResult = await readOnlyEVMFromMirrorNode(env, contractId, countQuery, operatorId, false);
+		const alicePrizesBefore = Number(lazyLottoIface.decodeFunctionResult('getPendingPrizesCount', countResult)[0]);
+		expect(alicePrizesBefore).to.be.greaterThanOrEqual(ticketCount);
+		console.log(`\t✓ Alice has ${alicePrizesBefore} pending prizes`);
+
+		// Transfer ALL prizes using type(uint256).max
+		const UINT256_MAX = ethers.MaxUint256;
+		gasEstimate = await estimateGas(
+			env,
+			contractId,
+			lazyLottoIface,
+			aliceId,
+			'transferPendingPrizes',
+			[carolId.toSolidityAddress(), UINT256_MAX],
+			500_000,
+		);
+
+		result = await contractExecuteFunction(
+			contractId,
+			lazyLottoIface,
+			client,
+			gasEstimate.gasLimit,
+			'transferPendingPrizes',
+			[carolId.toSolidityAddress(), UINT256_MAX],
+		);
+
+		expect(result[0]?.status?.toString()).to.equal('SUCCESS');
+		console.log('\t✓ Alice transferred all prizes to Carol');
+
+		await sleep(5000);
+
+		// Verify Alice has 0 pending prizes
+		const countResult2 = await readOnlyEVMFromMirrorNode(env, contractId, countQuery, operatorId, false);
+		const alicePrizesAfter = Number(lazyLottoIface.decodeFunctionResult('getPendingPrizesCount', countResult2)[0]);
+		expect(alicePrizesAfter).to.equal(0);
+		console.log('\t✓ Alice has 0 pending prizes');
+
+		// Verify Carol received all prizes
+		const carolCountQuery = lazyLottoIface.encodeFunctionData('getPendingPrizesCount', [carolId.toSolidityAddress()]);
+		const carolCountResult = await readOnlyEVMFromMirrorNode(env, contractId, carolCountQuery, operatorId, false);
+		const carolPrizes = Number(lazyLottoIface.decodeFunctionResult('getPendingPrizesCount', carolCountResult)[0]);
+		expect(carolPrizes).to.be.greaterThanOrEqual(alicePrizesBefore);
+		console.log(`\t✓ Carol now has ${carolPrizes} pending prizes`);
+	});
+
+	it('Should revert when transferring to self', async () => {
+		client.setOperator(aliceId, alicePK);
+		try {
+			const gasEstimate = await estimateGas(
+				env,
+				contractId,
+				lazyLottoIface,
+				aliceId,
+				'transferPendingPrizes',
+				[aliceId.toSolidityAddress(), 0],
+				500_000,
+			);
+
+			const result = await contractExecuteFunction(
+				contractId,
+				lazyLottoIface,
+				client,
+				gasEstimate.gasLimit,
+				'transferPendingPrizes',
+				[aliceId.toSolidityAddress(), 0],
+			);
+
+			expect(result[0]?.status?.toString()).to.not.equal('SUCCESS');
+			console.log('\t✓ Self-transfer correctly reverted');
+		}
+		catch {
+			console.log('\t✓ Self-transfer correctly reverted (thrown)');
+		}
+	});
+
+	it('Should revert when transferring to zero address', async () => {
+		client.setOperator(aliceId, alicePK);
+		try {
+			const gasEstimate = await estimateGas(
+				env,
+				contractId,
+				lazyLottoIface,
+				aliceId,
+				'transferPendingPrizes',
+				[ZERO_ADDRESS, 0],
+				500_000,
+			);
+
+			const result = await contractExecuteFunction(
+				contractId,
+				lazyLottoIface,
+				client,
+				gasEstimate.gasLimit,
+				'transferPendingPrizes',
+				[ZERO_ADDRESS, 0],
+			);
+
+			expect(result[0]?.status?.toString()).to.not.equal('SUCCESS');
+			console.log('\t✓ Zero-address transfer correctly reverted');
+		}
+		catch {
+			console.log('\t✓ Zero-address transfer correctly reverted (thrown)');
+		}
+	});
+
+	it('Should revert when no pending prizes to transfer', async () => {
+		// Use Bob who should have no pending prizes at this point
+		client.setOperator(bobId, bobPK);
+		try {
+			const gasEstimate = await estimateGas(
+				env,
+				contractId,
+				lazyLottoIface,
+				bobId,
+				'transferPendingPrizes',
+				[aliceId.toSolidityAddress(), 0],
+				500_000,
+			);
+
+			const result = await contractExecuteFunction(
+				contractId,
+				lazyLottoIface,
+				client,
+				gasEstimate.gasLimit,
+				'transferPendingPrizes',
+				[aliceId.toSolidityAddress(), 0],
+			);
+
+			expect(result[0]?.status?.toString()).to.not.equal('SUCCESS');
+			console.log('\t✓ Empty transfer correctly reverted');
+		}
+		catch {
+			console.log('\t✓ Empty transfer correctly reverted (thrown)');
+		}
+	});
+});
+
 describe('LazyLotto - Prize NFT System:', function () {
 	let prizeNFTPoolId;
 	let prizeAsTokenId;

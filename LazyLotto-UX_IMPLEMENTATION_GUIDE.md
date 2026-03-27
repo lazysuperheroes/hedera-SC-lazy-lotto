@@ -1,8 +1,8 @@
 # LazyLotto - UX Implementation Guide for Frontend Developers
 
-**Version:** 2.2
+**Version:** 2.3
 **Last Updated:** March 2026
-**Contract Versions:** LazyLotto 23.782 KB | LazyLottoPoolManager 9.396 KB | LazyLottoStorage 11.137 KB
+**Contract Versions:** LazyLotto 23.987 KB | LazyLottoPoolManager 9.396 KB | LazyLottoStorage 11.137 KB
 **Target Audience:** Frontend Developers, UX Designers, Integration Engineers
 
 ---
@@ -21,6 +21,12 @@
 ## Overview
 
 This guide provides comprehensive instructions for building user-facing applications that interact with the LazyLotto smart contract. It covers all user flows, required contract method calls, data presentation patterns, error handling, gas estimation strategies, and best practices for creating an intuitive lottery experience.
+
+### Key Updates in v2.3
+
+- ✅ **Prize Transfer**: New `transferPendingPrizes()` function allows reassigning pending prizes to another wallet without any token movement — pure in-memory storage update. Enables agent wallets to forward winnings to an owner's EOA, prize gifting between users, and multi-wallet consolidation. No token associations required on either side; the recipient claims via the standard `claimPrize` / `claimAllPrizes` flow.
+- ✅ **MCP Agent Support**: Contract now supports autonomous agent play patterns — an agent wallet plays the lottery, then transfers prizes to the owner's main wallet. The owner sees prizes in the normal pending list on the website. See `docs/MCP_INTEGRATION_DESIGN.md` for the full agent integration architecture.
+- ⚠️ **Optimizer Change**: Optimizer runs lowered from 200 to 75 to accommodate the new function within the 24 KB contract size limit. Runtime gas is marginally higher but negligible on Hedera's fee model.
 
 ### Key Updates in v2.1
 
@@ -42,7 +48,7 @@ This guide provides comprehensive instructions for building user-facing applicat
 
 LazyLotto uses a **three-contract architecture** for size optimization and separation of concerns:
 
-- **LazyLotto** (23.782 KB): Your primary interface - handles all business logic, user interactions, and admin operations
+- **LazyLotto** (23.987 KB): Your primary interface - handles all business logic, user interactions, and admin operations
 - **LazyLottoPoolManager** (9.396 KB): Manages pool ownership, community pool creation, proceeds, and bonus calculations
 - **LazyLottoStorage** (11.137 KB): Internal contract that holds tokens and executes HTS operations
 
@@ -197,6 +203,10 @@ claimPrize(prizeIndex)
 claimAllPrizes()
 redeemPrizeToNFT(indices) → int64[]
 claimPrizeFromNFT(tokenId, serialNumbers)
+
+// Prize transfer (in-memory reassignment, no token movement)
+transferPendingPrizes(recipient, pkgIdx)        // single prize by index
+transferPendingPrizes(recipient, type(uint256).max)  // all prizes
 ```
 
 ### Critical Gas Estimation Pattern
@@ -231,6 +241,7 @@ await contract.rollAll(poolId, { gasLimit: Math.ceil(gasEstimate * 1.5) });
 - `buyEntry()` - no multiplier needed
 - `claimPrize()` - no multiplier needed
 - `buyAndRedeemEntry()` - no multiplier needed
+- `transferPendingPrizes()` - no multiplier needed (pure storage, no external calls)
 
 ### Mirror Node Balance Verification
 
@@ -294,6 +305,9 @@ rollWithNFT(poolId, serialNumbers)
 claimPrize(pkgIdx)
 claimAllPrizes()
 claimPrizeFromNFT(tokenId, serialNumbers)
+
+// Prize transfer (in-memory only, no token movement or associations needed)
+transferPendingPrizes(recipient, pkgIdx)  // single prize, or type(uint256).max for all
 
 // Prize trading
 redeemPrizeToNFT(indices) → int64[]
@@ -1363,6 +1377,30 @@ async function claimAllPrizes() {
   return claimedPrizes;
 }
 ```
+
+**Transfer Prizes to Another Wallet:**
+```javascript
+async function transferPrize(recipientAddress, prizeIndex) {
+  // Transfer a single prize — in-memory only, no token movement
+  const tx = await contract.transferPendingPrizes(recipientAddress, prizeIndex, {
+    gasLimit: 500_000,
+  });
+  await tx.wait();
+  // Recipient can now claim via claimPrize() from their own wallet
+}
+
+async function transferAllPrizes(recipientAddress) {
+  // Transfer ALL prizes — pass type(uint256).max as index
+  const tx = await contract.transferPendingPrizes(
+    recipientAddress,
+    ethers.MaxUint256,
+    { gasLimit: 500_000 },
+  );
+  await tx.wait();
+}
+```
+
+> **Note:** `transferPendingPrizes` reassigns prize ownership in the contract's storage only. No tokens are transferred, no token associations are required on either side, and gas costs are minimal. The recipient sees the prizes in their pending array and claims them through the standard flow. This is the primary mechanism for agent wallets to forward winnings to their owner.
 
 **Display Recommendations:**
 

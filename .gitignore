@@ -35,6 +35,7 @@ scripts/deployments/generateExtraPrizes.js
 prizes-*.json
 old_contract_prizes.json
 all_prizes.json
+extracted-prizes/
 
 # Internal strategy documents
 POOL_STRATEGY.md
