@@ -526,6 +526,25 @@
             {
                 "indexed": true,
                 "internalType": "address",
+                "name": "from",
+                "type": "address"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "to",
+                "type": "address"
+            }
+        ],
+        "name": "PrizeTransferred",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "address",
                 "name": "user",
                 "type": "address"
             },
@@ -1770,6 +1789,24 @@
             }
         ],
         "name": "transferHbarFromStorage",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "recipient",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "pkgIdx",
+                "type": "uint256"
+            }
+        ],
+        "name": "transferPendingPrizes",
         "outputs": [],
         "stateMutability": "nonpayable",
         "type": "function"
