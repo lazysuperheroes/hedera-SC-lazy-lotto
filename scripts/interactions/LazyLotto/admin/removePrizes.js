@@ -20,6 +20,11 @@
 
 require('dotenv').config();
 const { ethers } = require('ethers');
+const {
+	AccountAllowanceApproveTransaction,
+	Hbar,
+	HbarUnit,
+} = require('@hashgraph/sdk');
 const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
 const { loadInterface } = require('../../../../utils/abiLoader');
 const { prompt } = require('../../../../utils/promptHelpers');
@@ -121,65 +126,130 @@ async function removePrizes() {
 
 		// Display prizes
 		for (let i = 0; i < prizes.length; i++) {
-			console.log(`Prize Package #${i}:`);
+			const prize = prizes[i];
+			const parts = [];
 
-			// FT components
-			if (prizes[i].ftComponents && prizes[i].ftComponents.length > 0) {
-				console.log('  Fungible Tokens:');
-				for (const ft of prizes[i].ftComponents) {
-					const tokenId = await convertToHederaId(ft.tokenAddress);
-					console.log(`    - ${ethers.formatUnits(ft.amount, ft.decimals)} ${tokenId}`);
+			// Fungible component (HBAR or HTS token)
+			if (BigInt(prize.amount) > 0n) {
+				const tokenId = await convertToHederaId(prize.token);
+				if (tokenId === 'HBAR') {
+					parts.push(`${ethers.formatUnits(prize.amount, 8)} HBAR`);
+				}
+				else {
+					parts.push(`${prize.amount.toString()} raw ${tokenId}`);
 				}
 			}
 
 			// NFT components
-			if (prizes[i].nftComponents && prizes[i].nftComponents.length > 0) {
-				console.log('  NFTs:');
-				for (const nft of prizes[i].nftComponents) {
-					const tokenId = await convertToHederaId(nft.tokenAddress);
-					console.log(`    - ${nft.serials.length} serials from ${tokenId}`);
+			if (prize.nftTokens && prize.nftTokens.length > 0) {
+				for (let k = 0; k < prize.nftTokens.length; k++) {
+					if (prize.nftTokens[k] === '0x0000000000000000000000000000000000000000') continue;
+					const tokenId = await convertToHederaId(prize.nftTokens[k]);
+					const serials = prize.nftSerials[k].map(s => Number(s));
+					parts.push(`${serials.length} NFT(s) from ${tokenId} [${serials.join(',')}]`);
 				}
 			}
+
+			console.log(`  #${i}: ${parts.length > 0 ? parts.join(' + ') : '(empty)'}`);
 		}
 
-		// Estimate gas
-		console.log('\n⛽ Estimating gas...');
-		const gasInfo = await estimateGas(env, contractId, lazyLottoIface, operatorId, 'removePrizes', [poolId], 500000);
-		const gasEstimate = gasInfo.gasLimit;
-		console.log(`   Estimated: ~${gasEstimate} gas\n`);
+		// Calculate gas per prize based on NFT count
+		// Base gas for contract logic + per-NFT gas for HTS transfers
+		const BASE_GAS = 300_000;
+		const GAS_PER_NFT = 80_000;
+		const MAX_RETRIES = 3;
+
+		let maxNFTs = 0;
+		for (const prize of prizes) {
+			let nftCount = 0;
+			if (prize.nftTokens) {
+				for (let k = 0; k < prize.nftTokens.length; k++) {
+					if (prize.nftTokens[k] !== '0x0000000000000000000000000000000000000000') {
+						nftCount += prize.nftSerials[k].length;
+					}
+				}
+			}
+			if (nftCount > maxNFTs) maxNFTs = nftCount;
+		}
+
+		const gasLimit = Math.max(600_000, BASE_GAS + GAS_PER_NFT * maxNFTs);
+		console.log(`\n⛽ Gas limit: ${gasLimit.toLocaleString()} (max ${maxNFTs} NFTs in a single prize)\n`);
 
 		// Confirm
 		console.log('⚠️  This will remove ALL prizes from the pool and return them to your account.');
+		console.log(`   ${prizes.length} transactions will be sent (one per prize).\n`);
 		const confirmAnswer = await prompt(`Remove ${prizes.length} prize packages from pool #${poolId}? (yes/no): `);
 		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Operation cancelled');
 			process.exit(0);
 		}
 
-		// Execute
-		console.log('\n🔄 Removing prizes...');
+		// Ensure HBAR allowance to storage for NFT royalty dust transfers
+		const hasNFTs = maxNFTs > 0;
 
-		const gasLimit = Math.floor(gasEstimate * 1.2);
-
-		const executionResult = await executeContractFunction({
-			contractId: contractId,
-			iface: lazyLottoIface,
-			client: client,
-			functionName: 'removePrizes',
-			params: [poolId],
-			gas: gasLimit,
-			payableAmount: 0,
-		});
-
-		if (!executionResult.success) {
-			throw new Error(executionResult.error || 'Transaction execution failed');
+		if (hasNFTs) {
+			const storageId = getContractId('LAZY_LOTTO_STORAGE');
+			console.log(`🔑 Approving HBAR allowance to storage (${storageId}) for NFT royalty dust...`);
+			const allowanceTx = await new AccountAllowanceApproveTransaction()
+				.approveHbarAllowance(operatorId, storageId, Hbar.from(1, HbarUnit.Hbar))
+				.execute(client);
+			const allowanceReceipt = await allowanceTx.getReceipt(client);
+			if (allowanceReceipt.status.toString() !== 'SUCCESS') {
+				throw new Error(`HBAR allowance failed: ${allowanceReceipt.status}`);
+			}
+			console.log('✅ HBAR allowance set\n');
 		}
 
-		const { receipt, record } = executionResult;
+		// Execute — remove prizes one at a time, always index 0 (swap-and-pop)
+		console.log('🔄 Removing prizes...\n');
 
-		console.log('\n✅ Prizes removed successfully!');
-		const txId = receipt.transactionId?.toString() || record?.transactionId?.toString() || 'N/A';
-		console.log(`📋 Transaction: ${txId}\n`);
+		let removed = 0;
+		const total = prizes.length;
+
+		for (let i = 0; i < total; i++) {
+			let attempt = 0;
+			let success = false;
+
+			while (attempt < MAX_RETRIES && !success) {
+				attempt++;
+				const retryLabel = attempt > 1 ? ` (retry ${attempt}/${MAX_RETRIES})` : '';
+				process.stdout.write(`   Removing prize ${i + 1}/${total}${retryLabel}...`);
+
+				const executionResult = await executeContractFunction({
+					contractId: contractId,
+					iface: lazyLottoIface,
+					client: client,
+					functionName: 'removePrizes',
+					params: [poolId, 0],
+					gas: gasLimit,
+					payableAmount: 0,
+				});
+
+				if (executionResult.success) {
+					success = true;
+					removed++;
+					console.log(' ✅');
+				}
+				else {
+					const errMsg = executionResult.error || '';
+					// HederaResponseCodes.UNKNOWN (21) — transient network error, safe to retry
+					const isTransient = errMsg.includes('UNKNOWN ERROR') && !errMsg.includes('INSUFFICIENT_GAS');
+
+					if (isTransient && attempt < MAX_RETRIES) {
+						console.log(` ⚠️  transient error, retrying in 3s...`);
+						await new Promise(r => setTimeout(r, 3000));
+					}
+					else {
+						console.log(' ❌');
+						console.error(`\n⚠️  Failed at prize ${i + 1}: ${errMsg}`);
+						console.log(`   ${removed} of ${total} prizes removed before failure.\n`);
+						throw new Error(errMsg || 'Transaction execution failed');
+					}
+				}
+			}
+		}
+
+		console.log(`\n✅ All ${removed} prizes removed successfully!`);
 		console.log('💰 Prizes returned to your account\n');
 
 	}

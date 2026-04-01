@@ -175,77 +175,83 @@ async function buyAndRedeemEntry() {
 		console.log(`   Pool: ${poolId}`);
 		console.log(`   Recipient: ${operatorId.toString()} (admin)`);
 
-		// Estimate gas
-		const gasInfo = await estimateGas(env, contractId, lazyLottoIface, operatorId, 'adminBuyAndRedeemEntry', [
-			poolId,
-			ticketCount,
-		], 2_000_000);
-		const gasEstimate = gasInfo.gasLimit;
-
 		// Confirm
+		const BUCKET_SIZE = 10;
+		const bucketCount = Math.ceil(ticketCount / BUCKET_SIZE);
+		console.log(`\n   Will mint in ${bucketCount} transaction(s) of up to ${BUCKET_SIZE} tickets each.`);
 		const confirmAnswer = await prompt(`Create ${ticketCount} free NFT tickets? (yes/no): `);
 		if (confirmAnswer.toLowerCase() !== 'yes' && confirmAnswer.toLowerCase() !== 'y') {
 			console.log('\n❌ Operation cancelled');
 			process.exit(0);
 		}
 
-		// Execute
-		console.log('\n🔄 Creating NFT tickets...');
+		// Execute in buckets of BUCKET_SIZE
+		console.log('\n🔄 Creating NFT tickets...\n');
 
-		const gasLimit = Math.floor(gasEstimate * 1.2);
+		const allSerials = [];
+		let minted = 0;
 
-		const executionResult = await executeContractFunction({
-			contractId: contractId,
-			iface: lazyLottoIface,
-			client: client,
-			functionName: 'adminBuyAndRedeemEntry',
-			params: [poolId, ticketCount],
-			gas: gasLimit,
-			payableAmount: 0,
-		});
+		for (let b = 0; b < bucketCount; b++) {
+			const thisBatch = Math.min(BUCKET_SIZE, ticketCount - minted);
+			process.stdout.write(`   Batch ${b + 1}/${bucketCount} (${thisBatch} tickets)...`);
 
-		if (!executionResult.success) {
-			throw new Error(executionResult.error || 'Transaction execution failed');
-		}
+			const gasInfo = await estimateGas(env, contractId, lazyLottoIface, operatorId, 'adminBuyAndRedeemEntry', [
+				poolId,
+				thisBatch,
+			], 2_000_000);
+			const gasLimit = Math.floor(gasInfo.gasLimit * 1.2);
 
-		const { receipt, record } = executionResult;
-
-		console.log('\n✅ NFT tickets created successfully!');
-		console.log(`🎫 ${ticketCount} tickets minted to ${operatorId.toString()}`);
-		console.log(`   Pool: ${poolId}`);
-		const txId = receipt.transactionId?.toString() || record?.transactionId?.toString() || 'N/A';
-		console.log(`📋 Transaction: ${txId}`);
-
-		// Try to decode serial numbers from record
-		try {
-			const logData = record.contractFunctionResult.logs.find(log => {
-				try {
-					const parsed = lazyLottoIface.parseLog({
-						topics: log.topics,
-						data: log.data,
-					});
-					return parsed && parsed.name === 'TicketEvent';
-				}
-				catch {
-					return false;
-				}
+			const executionResult = await executeContractFunction({
+				contractId: contractId,
+				iface: lazyLottoIface,
+				client: client,
+				functionName: 'adminBuyAndRedeemEntry',
+				params: [poolId, thisBatch],
+				gas: gasLimit,
+				payableAmount: 0,
 			});
 
-			if (logData) {
-				const parsed = lazyLottoIface.parseLog({
-					topics: logData.topics,
-					data: logData.data,
-				});
-				const serials = parsed.args.serialNumber;
-				console.log(`🎟️  Serial numbers: ${serials.join(', ')}\n`);
+			if (!executionResult.success) {
+				console.log(' ❌');
+				console.error(`\n⚠️  Failed at batch ${b + 1}: ${executionResult.error}`);
+				console.log(`   ${minted} of ${ticketCount} tickets minted before failure.\n`);
+				if (allSerials.length > 0) {
+					console.log(`🎟️  Serials minted so far: ${allSerials.join(', ')}`);
+				}
+				throw new Error(executionResult.error || 'Transaction execution failed');
 			}
-			else {
-				console.log('');
+
+			minted += thisBatch;
+
+			// Try to decode serial numbers from this batch
+			const { record } = executionResult;
+			try {
+				for (const log of (record.contractFunctionResult?.logs || [])) {
+					try {
+						const parsed = lazyLottoIface.parseLog({
+							topics: log.topics,
+							data: log.data,
+						});
+						if (parsed && parsed.name === 'TicketEvent') {
+							const serials = parsed.args.serialNumber;
+							for (const s of serials) allSerials.push(Number(s));
+						}
+					}
+					catch { /* skip non-matching logs */ }
+				}
 			}
+			catch { /* log parsing optional */ }
+
+			console.log(' ✅');
 		}
-		catch {
-			console.log('');
+
+		console.log(`\n✅ All ${minted} NFT tickets created successfully!`);
+		console.log(`🎫 Minted to ${operatorId.toString()}`);
+		console.log(`   Pool: ${poolId}`);
+		if (allSerials.length > 0) {
+			console.log(`🎟️  Serial numbers: ${allSerials.join(', ')}`);
 		}
+		console.log('');
 
 	}
 	catch (error) {

@@ -236,5 +236,5 @@ interface ILazyDelegateRegistry {
     function getSerialsDelegatedTo(
         address _user,
         address _token
-    ) external view returns (int64[] memory serials);
+    ) external view returns (uint256[] memory serials);
 }
