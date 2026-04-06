@@ -1,0 +1,160 @@
+// AUTO-GENERATED FILE — do not edit.
+// Source: abi/PrngSystemContract.json
+// Regenerate with: npm run build:abis
+module.exports = [
+  {
+    "inputs": [
+      {
+        "internalType": "string",
+        "name": "message",
+        "type": "string"
+      }
+    ],
+    "name": "ParamsError",
+    "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "enum PrngSystemContract.RandomType",
+        "name": "method",
+        "type": "uint8"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "randomNumber",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "bytes32",
+        "name": "seedBytes",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "lo",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "hi",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "userSeed",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "timestamp",
+        "type": "uint256"
+      }
+    ],
+    "name": "PrngEvent",
+    "type": "event"
+  },
+  {
+    "inputs": [],
+    "name": "generateRandomNumber",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "lo",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "hi",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "userSeed",
+        "type": "uint256"
+      }
+    ],
+    "name": "getPseudorandomNumber",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "randNum",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "lo",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "hi",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "userSeed",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "arrayLength",
+        "type": "uint256"
+      }
+    ],
+    "name": "getPseudorandomNumberArray",
+    "outputs": [
+      {
+        "internalType": "uint256[]",
+        "name": "randNums",
+        "type": "uint256[]"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "getPseudorandomSeed",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "seedBytes",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+];

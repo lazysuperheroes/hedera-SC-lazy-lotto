@@ -11,30 +11,28 @@
  *   const contract = new ethers.Contract(address, LazyLottoABI, provider);
  */
 
-const fs = require('fs');
-const path = require('path');
-
-// Load ABIs from the abi/ directory
-function loadABI(filename) {
-	const abiPath = path.join(__dirname, 'abi', filename);
-	return JSON.parse(fs.readFileSync(abiPath, 'utf8'));
-}
+// ABIs are loaded via require() so bundlers (webpack, Rollup, esbuild, Vite,
+// Next.js, etc.) and serverless runtimes can statically resolve them. The
+// `abi/*.js` files are auto-generated from `abi/*.json` by
+// `scripts/build-abis.js` (run via `npm run build:abis` or as part of
+// `scripts/deployments/extractABI.js`). Do NOT switch this back to
+// `fs.readFileSync` — it breaks every bundled and serverless consumer.
 
 // Core LazyLotto ABIs
-const LazyLottoABI = loadABI('LazyLotto.json');
-const LazyLottoStorageABI = loadABI('LazyLottoStorage.json');
-const LazyLottoPoolManagerABI = loadABI('LazyLottoPoolManager.json');
+const LazyLottoABI = require('./abi/LazyLotto.js');
+const LazyLottoStorageABI = require('./abi/LazyLottoStorage.js');
+const LazyLottoPoolManagerABI = require('./abi/LazyLottoPoolManager.js');
 
 // LazyTradeLotto ABI
-const LazyTradeLottoABI = loadABI('LazyTradeLotto.json');
+const LazyTradeLottoABI = require('./abi/LazyTradeLotto.js');
 
 // Supporting contract ABIs
-const LazyGasStationABI = loadABI('LazyGasStation.json');
-const LazyDelegateRegistryABI = loadABI('LazyDelegateRegistry.json');
+const LazyGasStationABI = require('./abi/LazyGasStation.js');
+const LazyDelegateRegistryABI = require('./abi/LazyDelegateRegistry.js');
 
 // Hedera system ABIs (for reference)
-const HederaTokenServiceABI = loadABI('HederaTokenService.json');
-const PrngSystemContractABI = loadABI('PrngSystemContract.json');
+const HederaTokenServiceABI = require('./abi/HederaTokenService.js');
+const PrngSystemContractABI = require('./abi/PrngSystemContract.js');
 
 // Contract addresses helper
 const ContractAddresses = {

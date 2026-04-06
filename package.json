@@ -1,8 +1,9 @@
 {
   "name": "@lazysuperheroes/lazy-lotto",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "LazyLotto and LazyTradeLotto lottery systems on Hedera - ABIs and CLI tools",
   "main": "index.js",
+  "sideEffects": false,
   "bin": {
     "lazy-lotto": "cli/index.js"
   },
@@ -42,7 +43,9 @@
     "test-lotto": "npx hardhat test test/LazyLotto.test.js",
     "test-lotto-pool-manager": "npx hardhat test test/LazyLottoPoolManager.test.js",
     "test-lazy": "npx hardhat test test/LAZYTokenCreator.test.js",
-    "test-delegate": "npx hardhat test test/LazyDelegateRegistry.test.js"
+    "test-delegate": "npx hardhat test test/LazyDelegateRegistry.test.js",
+    "build:abis": "node scripts/build-abis.js",
+    "prepublishOnly": "node scripts/build-abis.js"
   },
   "author": "Stowerling <stowerling@hbarbarians.co.uk>",
   "contributors": [

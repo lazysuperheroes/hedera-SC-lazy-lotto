@@ -1,9 +1,11 @@
 // get a list of files in the ../../artifacts/contracts/ directory
 // read in the files and extract the .abi element from the JSON
 // write the .abi to a file in the ../../abi/ directory using the same name as the contract
+// then regenerate the bundler-friendly abi/*.js wrappers from the JSON sources
 
 const fs = require('fs');
 const path = require('path');
+const { buildAbis } = require('../build-abis');
 
 const contractDir = './artifacts/contracts/';
 const abiDir = './abi/';
@@ -39,3 +41,9 @@ files.forEach((file) => {
 	);
 },
 );
+
+// Regenerate the bundler-friendly .js wrappers so consumers via webpack /
+// Rollup / esbuild / Vite / Next.js / serverless platforms can resolve the
+// ABIs through static require() instead of runtime fs.readFileSync.
+const generated = buildAbis(path.join(cwd, abiDir));
+console.log(`Generated ${generated.length} ABI module wrapper(s).`);
