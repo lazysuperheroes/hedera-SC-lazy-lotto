@@ -271,10 +271,29 @@ async function getUserState() {
 		console.log('═══════════════════════════════════════════════════════════\n');
 
 		// Get pending prizes count first
-		const prizeCount = (await queryContract(env, contractId, lazyLottoIface, 'getPendingPrizesCount', [userEvmAddress], operatorId))[0];
+		const prizeCount = Number((await queryContract(env, contractId, lazyLottoIface, 'getPendingPrizesCount', [userEvmAddress], operatorId))[0]);
 
-		// Get all pending prizes
-		const pendingPrizes = await queryContract(env, contractId, lazyLottoIface, 'getPendingPrizesPage', [userEvmAddress, 0, Number(prizeCount)], operatorId);
+		// Fetch pending prizes in small chunks — each PendingPrize can contain nested NFT
+		// arrays, so loading dozens in one call blows the mirror-node gas budget.
+		const PRIZE_PAGE_SIZE = 5;
+		const PRIZE_PAGE_GAS = 2_000_000;
+		const collectedPrizes = [];
+		for (let offset = 0; offset < prizeCount; offset += PRIZE_PAGE_SIZE) {
+			const count = Math.min(PRIZE_PAGE_SIZE, prizeCount - offset);
+			const page = await queryContract(
+				env,
+				contractId,
+				lazyLottoIface,
+				'getPendingPrizesPage',
+				[userEvmAddress, offset, count],
+				operatorId,
+				{ gas: PRIZE_PAGE_GAS },
+			);
+			for (const p of page[0]) {
+				collectedPrizes.push(p);
+			}
+		}
+		const pendingPrizes = [collectedPrizes];
 
 		console.log('═══════════════════════════════════════════════════════════');
 		console.log('  PENDING PRIZES');
@@ -424,7 +443,13 @@ async function getUserState() {
 	}
 	catch (error) {
 		console.error('\n❌ Error fetching user state:', error.message);
-		if (error.status) {
+		if (error.response) {
+			console.error('HTTP status:', error.response.status);
+			if (error.response.data) {
+				console.error('Response body:', JSON.stringify(error.response.data, null, 2));
+			}
+		}
+		else if (error.status) {
 			console.error('Status:', error.status.toString());
 		}
 		process.exit(1);
