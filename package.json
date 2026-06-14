@@ -53,6 +53,7 @@
   ],
   "license": "ISC",
   "devDependencies": {
+    "@lazysuperheroes/hedera-verify": "^0.2.0",
     "@nomicfoundation/hardhat-chai-matchers": "^2.0.2",
     "@nomicfoundation/hardhat-ethers": "^3.0.4",
     "@nomicfoundation/hardhat-network-helpers": "^1.0.9",

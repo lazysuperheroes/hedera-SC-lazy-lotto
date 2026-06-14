@@ -50,6 +50,7 @@ const { ethers } = require('ethers');
 const { contractDeployFunction, contractExecuteFunction } = require('../../utils/solidityHelpers');
 const { getEnvConfig, createClient } = require('../../utils/clientFactory');
 const { queryContract } = require('../../utils/queryHelpers');
+const { verifyContract } = require('@lazysuperheroes/hedera-verify');
 
 // CLI flags
 const args = process.argv.slice(2);
@@ -62,6 +63,9 @@ const showHelp = args.includes('--help') || args.includes('-h');
 // Configuration
 const STATE_FILE = './deployment-state.json';
 const env = process.env.ENVIRONMENT ?? 'TEST';
+
+// Opt-in Sourcify source verification right after each fresh deploy.
+const verifyOnDeploy = process.env.VERIFY_ON_DEPLOY === 'true' || process.env.VERIFY_ON_DEPLOY === '1';
 
 // Contract names
 const CONTRACTS = {
@@ -122,6 +126,35 @@ const interfaces = {};
 // Helper functions
 function sleep(ms) {
 	return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Verify a freshly-deployed contract's source on Sourcify. Opt-in via
+ * VERIFY_ON_DEPLOY; read-only (no key/gas) and best-effort — a verification
+ * failure must never abort a deployment, so this never throws.
+ * @param {string} contractName  artifact contract name (e.g. 'LazyLotto')
+ * @param {import('@hashgraph/sdk').ContractId} contractId  fresh deploy id
+ * @param {string} [sourceName]  only when path !== contracts/<contractName>.sol
+ */
+async function maybeVerifySource(contractName, contractId, sourceName) {
+	if (!verifyOnDeploy) return;
+	try {
+		const result = await verifyContract({
+			contractName,
+			sourceName,
+			env,
+			contractId: contractId.toString(),
+			// let the mirror node index the freshly-deployed contract first
+			initialDelayMs: 10000,
+			attempts: 4,
+			retryDelayMs: 8000,
+		});
+		console.log(`  Sourcify [${contractName}]: ${result.status}${result.match ? ` (${result.match})` : ''}`);
+		if (result.repoUrl) console.log(`    ${result.repoUrl}`);
+	}
+	catch (error) {
+		console.warn(`  Sourcify verify for ${contractName} skipped (non-fatal): ${error.message}`);
+	}
 }
 
 function loadState() {
@@ -309,6 +342,7 @@ async function stepLazyToken() {
 				);
 				state.contracts.lazySCT = sctId;
 				console.log(`LAZY SCT deployed: ${sctId.toString()}`);
+				await maybeVerifySource(CONTRACTS.lazyTokenCreator, sctId, 'contracts/legacy/LAZYTokenCreator.sol');
 			}
 
 			// Get token parameters
@@ -365,6 +399,7 @@ async function stepGasStation() {
 				params,
 			);
 			console.log(`LazyGasStation deployed: ${id.toString()}`);
+			await maybeVerifySource(CONTRACTS.lazyGasStation, id);
 			return id;
 		},
 	);
@@ -389,6 +424,7 @@ async function stepDelegateRegistry() {
 				2_100_000,
 			);
 			console.log(`LazyDelegateRegistry deployed: ${id.toString()}`);
+			await maybeVerifySource(CONTRACTS.lazyDelegateRegistry, id);
 			return id;
 		},
 	);
@@ -413,6 +449,7 @@ async function stepPRNG() {
 				1_800_000,
 			);
 			console.log(`PRNG deployed: ${id.toString()}`);
+			await maybeVerifySource(CONTRACTS.prng, id);
 			return id;
 		},
 	);
@@ -442,6 +479,7 @@ async function stepStorage() {
 				params,
 			);
 			console.log(`LazyLottoStorage deployed: ${id.toString()}`);
+			await maybeVerifySource(CONTRACTS.lazyLottoStorage, id);
 			return id;
 		},
 	);
@@ -477,6 +515,7 @@ async function stepLazyLotto() {
 				params,
 			);
 			console.log(`LazyLotto deployed: ${id.toString()}`);
+			await maybeVerifySource(CONTRACTS.lazyLotto, id);
 			return id;
 		},
 	);
@@ -576,6 +615,7 @@ async function stepPoolManager() {
 				params,
 			);
 			console.log(`LazyLottoPoolManager deployed: ${id.toString()}`);
+			await maybeVerifySource(CONTRACTS.poolManager, id);
 			return id;
 		},
 	);
@@ -680,6 +720,7 @@ async function stepTradeLotto() {
 			);
 			console.log(`LazyTradeLotto deployed: ${id.toString()}`);
 			console.log(`System wallet: ${signingWallet.address}`);
+			await maybeVerifySource(CONTRACTS.tradeLotto, id);
 			return id;
 		},
 	);

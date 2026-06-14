@@ -10,6 +10,7 @@ const readlineSync = require('readline-sync');
 const { contractDeployFunction, contractExecuteFunction } = require('../../utils/solidityHelpers');
 const { getEnvConfig, createClient } = require('../../utils/clientFactory');
 const { loadInterface } = require('../../utils/abiLoader');
+const { verifyContract } = require('@lazysuperheroes/hedera-verify');
 
 // Contract names and configuration
 const lazyContractCreator = 'LAZYTokenCreator';
@@ -401,6 +402,28 @@ const main = async () => {
 	console.log(
 		`Lazy Trade Lotto Contract created with ID: ${ltlContractId} / ${ltlContractAddress}`,
 	);
+
+	// Opt-in Sourcify source verification (read-only; no key/gas). Best-effort —
+	// never abort the deploy on a verification hiccup.
+	if (process.env.VERIFY_ON_DEPLOY === 'true' || process.env.VERIFY_ON_DEPLOY === '1') {
+		console.log('\n- Verifying LazyTradeLotto source on Sourcify...');
+		try {
+			const verifyResult = await verifyContract({
+				contractName,
+				env,
+				contractId: ltlContractId.toString(),
+				// let the mirror node index the freshly-deployed contract first
+				initialDelayMs: 10000,
+				attempts: 4,
+				retryDelayMs: 8000,
+			});
+			console.log(`  Sourcify: ${verifyResult.status}${verifyResult.match ? ` (${verifyResult.match})` : ''}`);
+			if (verifyResult.repoUrl) console.log(`  ${verifyResult.repoUrl}`);
+		}
+		catch (verifyError) {
+			console.warn(`  Sourcify verification skipped (non-fatal): ${verifyError.message}`);
+		}
+	}
 
 	// Step 10: Add the contract as a user of the Gas Station
 	console.log('\n- Adding LazyTradeLotto as a contract user of LazyGasStation...');
