@@ -9,6 +9,7 @@ const {
 	AccountId,
 	PrivateKey,
 	ContractId,
+	Hbar,
 } = require('@hashgraph/sdk');
 require('dotenv').config();
 
@@ -40,6 +41,12 @@ function createClient(env, operatorId, operatorKey) {
 	}
 
 	client.setOperator(operatorId, operatorKey);
+	// Raise the per-transaction fee CAP (not actual cost — the network charges its
+	// real fee, far lower). The SDK default is too low for multi-allowance approvals
+	// and high-gas contract calls (e.g. NFT-bundle addPrizePackage), which otherwise
+	// fail with INSUFFICIENT_TX_FEE. Capped at 20 ℏ — the SDK's setDefaultMaxTransactionFee
+	// rejects values above ~21.47 ℏ (int32 tinybar limit).
+	client.setDefaultMaxTransactionFee(new Hbar(20));
 	return client;
 }
 
