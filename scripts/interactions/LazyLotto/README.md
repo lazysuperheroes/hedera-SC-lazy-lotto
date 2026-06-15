@@ -25,6 +25,7 @@ Read-only scripts for retrieving contract state:
 - **`userState.js`** - User's tickets, prizes, and boost information
 - **`poolPrizes.js`** - All prizes in a pool with detailed breakdown
 - **`contractConfig.js`** - Contract configuration and settings
+- **`analysePlayPatterns.js`** - Replays on-chain events + state to analyse play patterns: who plays which pools, paid vs free vs NFT-sourced entries, bonus usage, actual-vs-expected win odds, hourly activity, top players, prize claims. Pass a contract ID and `--env`, optionally `--json <path>`.
 
 ### 👤 User Scripts (`user/`)
 
