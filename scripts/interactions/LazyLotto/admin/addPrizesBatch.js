@@ -103,6 +103,12 @@ const main = async () => {
 	// Parse command line arguments
 	const filePath = getArg('f') || getArg('-file');
 	const dryRun = getArgFlag('dry') || getArgFlag('-dry-run');
+	// -combine: batch fungible-only prizes (HBAR / single FT, no NFTs) via
+	// addMultipleFungiblePrizes instead of one addPrizePackage each. NFT-bearing
+	// packages still go individually. Win selection is random (swap-and-pop) so
+	// insertion order is irrelevant — this is a pure speed/gas optimisation.
+	const combine = getArgFlag('combine');
+	const chunkSize = parseInt(getArg('chunk'), 10) || 40;
 
 	if (!filePath) {
 		console.error('❌ Usage: node addPrizesBatch.js -f <file.json> [-dry]');
@@ -544,13 +550,95 @@ const main = async () => {
 		}
 	}
 
-	// Build contract parameters - send packages one at a time
+	// Partition for submission. With --combine, fungible-only prizes (HBAR or a
+	// single FT, no NFTs) are grouped per token and sent in chunks via
+	// addMultipleFungiblePrizes; everything with an NFT goes one-at-a-time via
+	// addPrizePackage below. Without --combine, every package goes individually.
+	const isFungibleOnly = (p) => p.nftTokens.length === 0 && p.ftAmount !== '0';
+	const fungibleBatchable = combine ? processedPackages.filter(isFungibleOnly) : [];
+	const nftPackages = combine ? processedPackages.filter(p => !isFungibleOnly(p)) : processedPackages;
+
 	console.log('\n📤 Submitting packages...');
+	if (combine) {
+		console.log(`   ⚡ Combine mode: ${fungibleBatchable.length} fungible prize(s) batched (chunk ${chunkSize}) + ${nftPackages.length} NFT package(s) individual`);
+	}
 	let successCount = 0;
 
-	for (let i = 0; i < processedPackages.length; i++) {
-		const pkg = processedPackages[i];
-		console.log(`\n📦 Package ${i + 1}/${processedPackages.length}`);
+	// --- Fungible-only prizes via addMultipleFungiblePrizes (grouped + chunked) ---
+	if (combine && fungibleBatchable.length > 0) {
+		const HBAR_ADDR = '0x0000000000000000000000000000000000000000';
+		const byToken = new Map();
+		for (const p of fungibleBatchable) {
+			if (!byToken.has(p.ftToken)) byToken.set(p.ftToken, []);
+			byToken.get(p.ftToken).push(p.ftAmount);
+		}
+
+		for (const [token, amounts] of byToken.entries()) {
+			const isHbar = token === HBAR_ADDR;
+			const tokenLabel = isHbar ? 'HBAR' : await convertToHederaId(token, EntityType.TOKEN);
+			const totalChunks = Math.ceil(amounts.length / chunkSize);
+
+			for (let off = 0; off < amounts.length; off += chunkSize) {
+				const chunk = amounts.slice(off, off + chunkSize);
+				const chunkNum = Math.floor(off / chunkSize) + 1;
+				const sum = chunk.reduce((s, a) => s + BigInt(a), 0n);
+
+				console.log(`\n🪙 Fungible batch ${chunkNum}/${totalChunks} — ${chunk.length} prize(s) of ${tokenLabel}`);
+				if (isHbar) {
+					console.log(`   Payable: ${new Hbar(sum.toString(), HbarUnit.Tinybar).toString()}`);
+				}
+
+				if (dryRun) {
+					console.log('   🧪 Dry run - skipping submission');
+					successCount += chunk.length;
+					continue;
+				}
+
+				try {
+					const payableTinybars = isHbar ? sum.toString() : '0';
+					const fallbackGas = 400000 + (chunk.length * 70000);
+					const gasInfo = await estimateGas(
+						env,
+						contractId,
+						iface,
+						operatorId,
+						'addMultipleFungiblePrizes',
+						[config.poolId, token, chunk],
+						fallbackGas,
+						Number(payableTinybars),
+					);
+
+					const executionResult = await executeContractFunction({
+						contractId: contractId,
+						iface: iface,
+						client: client,
+						functionName: 'addMultipleFungiblePrizes',
+						params: [config.poolId, token, chunk],
+						gas: gasInfo.gasLimit,
+						payableAmount: new Hbar(payableTinybars, HbarUnit.Tinybar),
+					});
+
+					if (!executionResult.success) {
+						throw new Error(executionResult.error || 'Transaction execution failed');
+					}
+
+					const { receipt, record } = executionResult;
+					const txId = receipt.transactionId?.toString() || record?.transactionId?.toString() || 'N/A';
+					console.log(`   ✅ Success (${chunk.length} prizes) - TX: ${txId}`);
+					successCount += chunk.length;
+				}
+				catch (error) {
+					console.error(`   ❌ Batch failed: ${error.message}`);
+					console.log('   Continuing with remaining batches...');
+				}
+			}
+		}
+	}
+
+	// --- NFT-bearing prizes via addPrizePackage (one at a time) ---
+	for (let i = 0; i < nftPackages.length; i++) {
+		const pkg = nftPackages[i];
+		console.log(`\n📦 Package ${i + 1}/${nftPackages.length}`);
 
 		if (dryRun) {
 			console.log('   🧪 Dry run - skipping submission');
@@ -603,8 +691,10 @@ const main = async () => {
 				payableInTinybars,
 			);
 
-			// Add association gas on top of estimated gas (estimation doesn't account for first-time associations)
-			const gasLimit = gasInfo.gasLimit + tokenAssociationGas;
+			// Add association gas on top of estimated gas (estimation doesn't account for first-time associations).
+			// Floor the call gas at 500k: the mirror node occasionally low-balls the estimate for an NFT
+			// transfer (seen as INSUFFICIENT_GAS even after the buffer); 500k safely covers a 1-NFT addPrizePackage.
+			const gasLimit = Math.max(gasInfo.gasLimit, 500_000) + tokenAssociationGas;
 			if (tokenAssociationGas > 0) {
 				console.log(`   💡 (+ ${tokenAssociationGas.toLocaleString()} for ${(tokenAssociationGas / 1_000_000)} token association(s))`);
 			}
