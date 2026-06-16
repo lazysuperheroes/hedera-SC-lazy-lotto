@@ -41,3 +41,10 @@ extracted-prizes/
 # Internal strategy documents
 POOL_STRATEGY.md
 SOFT_LAUNCH_PRIZE_PLAN.md
+
+# Internal operational prize recipes — their _notes name treasury wallets
+# (admin hub, gem vault), held-back reserve inventory, and sourcing strategy.
+# Keep local; only the sanitized example templates are tracked.
+scripts/interactions/LazyLotto/admin/recipes/*.json
+!scripts/interactions/LazyLotto/admin/recipes/lazyLounge-stage1.json
+!scripts/interactions/LazyLotto/admin/recipes/luckyDip-initial.json
