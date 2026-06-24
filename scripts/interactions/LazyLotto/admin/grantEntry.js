@@ -20,12 +20,14 @@
  */
 
 require('dotenv').config();
+const { default: axios } = require('axios');
 const { AccountId } = require('@hashgraph/sdk');
 const { createClient, getEnvConfig, getContractId } = require('../../../../utils/clientFactory');
 const { loadInterface } = require('../../../../utils/abiLoader');
 const { prompt } = require('../../../../utils/promptHelpers');
 const { queryContract } = require('../../../../utils/queryHelpers');
 const { estimateGas } = require('../../../../utils/gasHelpers');
+const { getBaseURL } = require('../../../../utils/hederaMirrorHelpers');
 const {
 	executeContractFunction,
 	checkMultiSigHelp,
@@ -35,6 +37,100 @@ const {
 // Environment setup
 const { operatorId, operatorKey, env } = getEnvConfig();
 const contractId = getContractId('LAZY_LOTTO_CONTRACT_ID');
+
+// Long-zero EVM address for a plain (non-aliased) Hedera account.
+function longZeroAddress(accountId) {
+	return '0x' + AccountId.fromString(accountId).toSolidityAddress();
+}
+
+/**
+ * Validate that a recipient input resolves to a real, plain USER account on the
+ * mirror node before we hand it a free entry.
+ *
+ * Why this exists: adminGrantEntry stores the entry under whatever address it is
+ * given. If that address belongs to no one (a mistyped ID, a wrong-network
+ * address, or — the classic foot-gun — a shard/realm typo like `0.9.136327`
+ * instead of `0.0.136327`, which encodes the `9` into the realm byte and yields
+ * a phantom EVM address), the free entry is stranded forever with no way to roll
+ * or redeem it. Granting to a contract is equally useless.
+ *
+ * Returns { ok, input, accountId, address, reason }. On success `address` is the
+ * mirror-confirmed canonical EVM address (matches the account's msg.sender when
+ * it later rolls/redeems) — we grant to THAT, so a manual 0x→entry conversion can
+ * never re-introduce a typo.
+ *
+ * @param {string} network network name (mainnet/testnet/...)
+ * @param {string} input   recipient as typed — `0.0.xxxxx` or `0x...`
+ */
+async function validateRecipient(network, input) {
+	const baseUrl = getBaseURL(network);
+
+	// 1. Pre-flight: for a Hedera ID, reject non-zero shard/realm BEFORE we build
+	//    any address from it. This is exactly the 0.9.x / 9.0.x typo class.
+	let lookupKey = input;
+	if (!input.startsWith('0x')) {
+		let accountId;
+		try {
+			accountId = AccountId.fromString(input);
+		}
+		catch {
+			return { ok: false, input, reason: 'not a valid account ID or 0x address' };
+		}
+		if (accountId.shard.toString() !== '0' || accountId.realm.toString() !== '0') {
+			return {
+				ok: false,
+				input,
+				reason: `shard/realm must be 0 — got shard=${accountId.shard}, realm=${accountId.realm} (typo? did you mean 0.0.${accountId.num}?)`,
+			};
+		}
+		lookupKey = accountId.toString();
+	}
+
+	// 2. Must exist as an ACCOUNT on the mirror node.
+	let acct;
+	try {
+		const { data } = await axios.get(`${baseUrl}/api/v1/accounts/${lookupKey}`);
+		acct = data;
+	}
+	catch (err) {
+		const status = err.response && err.response.status;
+		// 404 = not found; 400 = malformed / out-of-range id — both mean "not a real account".
+		if (status === 404 || status === 400) {
+			return { ok: false, input, reason: `no such account on the ${network} mirror node (${status}) — wrong ID, wrong network, or never created` };
+		}
+		return { ok: false, input, reason: `mirror lookup failed: ${err.message}` };
+	}
+
+	const accountId = acct.account;
+	if (!accountId) {
+		return { ok: false, input, reason: 'mirror returned no account id for this address' };
+	}
+	if (acct.deleted) {
+		return { ok: false, input, reason: `account ${accountId} is deleted` };
+	}
+
+	// 3. Must NOT be a contract — /accounts/ returns 200 for contracts too, so the
+	//    /contracts/ probe is the reliable discriminator (404 => plain account).
+	try {
+		await axios.get(`${baseUrl}/api/v1/contracts/${accountId}`);
+		return { ok: false, input, reason: `${accountId} is a CONTRACT, not a user account` };
+	}
+	catch (err) {
+		if (!(err.response && err.response.status === 404)) {
+			return { ok: false, input, reason: `could not confirm ${accountId} is not a contract: ${err.message}` };
+		}
+		// 404 => not a contract => good
+	}
+
+	// Canonical EVM address straight from mirror (the account's real msg.sender).
+	// Fall back to long-zero if mirror omits it.
+	let address = acct.evm_address;
+	if (!address || address === '0x') {
+		address = longZeroAddress(accountId);
+	}
+
+	return { ok: true, input, accountId, address };
+}
 
 async function grantEntry() {
 	// Check for multi-sig help request
@@ -96,29 +192,42 @@ async function grantEntry() {
 			process.exit(1);
 		}
 
-		// Convert all recipients to EVM addresses
+		// Validate every recipient against the mirror node BEFORE granting. This
+		// catches mistyped IDs, wrong-network addresses, contract addresses, and the
+		// shard/realm foot-gun (e.g. 0.9.136327 → a phantom address nobody controls)
+		// that would otherwise silently strand a free entry forever.
+		console.log(`\n🔎 Validating ${recipientInputs.length} recipient(s) against the ${env} mirror node...`);
 		const recipients = [];
+		const invalid = [];
 		for (const input of recipientInputs) {
-			let recipientAddress;
-			if (input.startsWith('0x')) {
-				// EVM address
-				recipientAddress = input;
+			const v = await validateRecipient(env, input);
+			if (v.ok) {
+				const aliasNote = v.address.toLowerCase() !== longZeroAddress(v.accountId).toLowerCase()
+					? ' (ECDSA alias)' : '';
+				console.log(`   ✅ ${input} → ${v.accountId}${aliasNote}`);
+				recipients.push({ input, accountId: v.accountId, address: v.address });
 			}
 			else {
-				// Hedera ID - convert to EVM
-				try {
-					const accountId = AccountId.fromString(input);
-					recipientAddress = '0x' + accountId.toSolidityAddress();
-				}
-				catch {
-					console.error(`❌ Invalid account ID format: ${input}`);
-					process.exit(1);
-				}
+				console.log(`   ❌ ${input} → ${v.reason}`);
+				invalid.push(v);
 			}
-			recipients.push({ input, address: recipientAddress });
 		}
 
-		console.log(`\n✅ Parsed ${recipients.length} recipient(s)`);
+		if (invalid.length) {
+			console.log(`\n⚠️  ${invalid.length} recipient(s) failed validation and will NOT receive entries:`);
+			for (const v of invalid) console.log(`      • ${v.input} — ${v.reason}`);
+			if (recipients.length === 0) {
+				console.error('\n❌ No valid recipients remain. Aborting.');
+				process.exit(1);
+			}
+			const cont = await prompt(`\nProceed with only the ${recipients.length} valid recipient(s) and skip the invalid one(s)? (yes/no): `);
+			if (cont.toLowerCase() !== 'yes' && cont.toLowerCase() !== 'y') {
+				console.log('\n❌ Operation cancelled — fix the invalid recipient(s) and re-run.');
+				process.exit(0);
+			}
+		}
+
+		console.log(`\n✅ ${recipients.length} recipient(s) validated`);
 
 		// Get ticket counts
 		const ticketCountStr = await prompt(`Enter ticket count(s):\n  - Single number for all users\n  - Comma-separated list (must match ${recipients.length} recipients)\n  Count(s): `);
@@ -165,10 +274,12 @@ async function grantEntry() {
 		console.log(`  Total Entries: ${totalTickets}`);
 		console.log('');
 		for (let i = 0; i < recipients.length; i++) {
-			console.log(`  ${i + 1}. ${recipients[i].input} → ${ticketCounts[i]} entries`);
+			const r = recipients[i];
+			// Show the mirror-resolved account so the admin confirms the real target,
+			// not just what they typed.
+			const resolved = r.accountId && r.accountId !== r.input ? ` (${r.accountId})` : '';
+			console.log(`  ${i + 1}. ${r.input}${resolved} → ${ticketCounts[i]} entries`);
 		}
-		console.log('═══════════════════════════════════════════════════════════');
-
 		console.log('═══════════════════════════════════════════════════════════');
 
 		// Confirm
@@ -256,5 +367,9 @@ async function grantEntry() {
 	}
 }
 
-// Run the script
-grantEntry();
+// Run the script when invoked directly; stay importable (e.g. for tests/reuse).
+if (require.main === module) {
+	grantEntry();
+}
+
+module.exports = { validateRecipient, longZeroAddress };

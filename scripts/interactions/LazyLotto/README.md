@@ -67,8 +67,13 @@ Scripts for contract administrators:
 - **`withdrawTokens.js`** - Withdraw excess tokens (with safety checks)
 
 **Promotional Tools:**
-- **`grantEntry.js`** - Grant free entries to users
-- **`buyAndRedeemEntry.js`** - Create free NFT tickets for admin
+- **`grantEntry.js`** - Grant free entries to *any* address (in-memory entries, not NFTs)
+- **`buyAndRedeemEntry.js`** - Create free NFT tickets for the **admin's own wallet only**
+
+> 💡 To deliver free NFT tickets to **someone else** (e.g. a community manager) without
+> triggering NFT royalties, use the two-step pattern described in
+> [Delivering Free NFT Tickets to Another Address](#delivering-free-nft-tickets-to-another-address-royalty-free).
+> Do **not** mint to yourself and then transfer — that secondary transfer pays royalties.
 
 ## Usage Examples
 
@@ -148,6 +153,59 @@ await tokenContract.approve(storageAddress, amount);
 ```
 
 Scripts will automatically handle this for you.
+
+### Delivering Free NFT Tickets to Another Address (Royalty-Free)
+
+**Goal:** give free, tradeable NFT tickets to a *different* account (a community manager,
+a winner, a promo recipient) — not the admin's own wallet.
+
+**Why you can't just mint-and-send:** `adminBuyAndRedeemEntry` (`buyAndRedeemEntry.js`)
+hardcodes `msg.sender` as the recipient, so it only ever mints to the admin's own wallet.
+If the admin then transfers those NFTs onward, that is a **secondary transfer** and the
+pool ticket collection's **royalty fee is charged** — the "tricky to send" problem.
+
+**Why the two-step pattern is free:** on Hedera, custom royalty fees are **not assessed
+when the token treasury is the sender**. `LazyLottoStorage` *is* the treasury for pool
+ticket NFTs and mints + transfers directly to the recipient in one operation
+(`mintAndTransferNFT`). Because the recipient receives straight from treasury, no royalty
+is charged. The admin wallet never touches the NFT, so there is no royalty-bearing hop.
+
+**Steps (no contract change / redeploy required):**
+
+```bash
+# 1) Admin grants free in-memory entries to the recipient (not to themselves).
+#    adminGrantEntry(poolId, ticketCount, recipient) — recipient is an arbitrary address.
+node scripts/interactions/LazyLotto/admin/grantEntry.js
+#    → enter poolId, ticketCount, and the recipient's account (e.g. the community manager)
+
+# 2) The RECIPIENT redeems their granted entries to NFTs, from their OWN account.
+#    redeemEntriesToNFT(poolId, ticketCount) uses msg.sender, so this must be run by them.
+#    NFTs are minted treasury → recipient = royalty-free.
+node scripts/interactions/LazyLotto/user/redeemEntriesToNFT.js
+```
+
+**Recipient prerequisites:**
+- Must have **associated** the pool's ticket NFT token before step 2 (Hedera requires
+  association to receive any token).
+- Must run step 2 themselves (with their own key) — the redeem call is keyed to `msg.sender`.
+
+**Cost:** the entries are free (granted with `isFreeOfPayment = true` in step 1); the
+recipient pays only network gas for the redeem transaction. No entry fee, no royalty.
+
+**Batch size — redeem in chunks of ~30:** redeeming mints NFTs in internal batches of 10,
+and the entire redeem is a single transaction bound by Hedera's ~15M gas-per-transaction
+cap. Redeeming too many at once reverts with `FailedNFTMintAndSend` (`0x5d06f460`) once gas
+runs out mid-mint — observed on mainnet: a **90-at-once redeem consumed ~14.4M gas and
+reverted** (pool #4). There is no way to fit 90 in one transaction regardless of the gas
+setting. The failed transaction **fully reverts**, so the granted entries are preserved and
+can simply be retried in smaller batches. Use **~30 per redeem** (≈5M gas, comfortable
+margin); ~50 is the aggressive upper bound.
+
+> If a single admin-only call that mints free tickets straight to an arbitrary address is
+> ever needed, it requires a contract change (add a `recipient` param to
+> `adminBuyAndRedeemEntry` / `_redeemEntriesToNFT`; `mintAndTransferNFT` already supports
+> it) **plus a mainnet redeploy + migration**. The two-step pattern above achieves the
+> identical royalty-free result with no redeploy and is the recommended approach.
 
 ### Input Formats
 
