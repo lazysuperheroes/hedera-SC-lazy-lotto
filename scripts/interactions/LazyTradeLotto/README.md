@@ -4,14 +4,14 @@ Complete suite of CLI scripts for managing and querying the LazyTradeLotto contr
 
 ## 📊 Migration Status
 
-**✅ MIGRATION COMPLETE: 12/12 Scripts Implemented (100%)**
+**✅ COMPLETE: 15/15 Scripts Implemented (100%)**
 
 | Category | Complete | Total | Status |
 |----------|----------|-------|--------|
 | Query Scripts | 4 | 4 | ✅ 100% |
 | Admin Scripts | 8 | 8 | ✅ 100% |
-| Testing Scripts | 0 | 3 | 🔴 0% (TODO) |
-| **Total** | **12** | **15** | **� 80%** |
+| Testing Scripts | 3 | 3 | ✅ 100% |
+| **Total** | **15** | **15** | **✅ 100%** |
 
 **Completed Actions:**
 1. ✅ Created 3 new query scripts (getLottoInfo, getUserBurn, checkTradeHistory)
@@ -20,9 +20,7 @@ Complete suite of CLI scripts for managing and querying the LazyTradeLotto contr
 4. ✅ Deleted 3 superseded root scripts (getLazyTradeLottoInfo, getBurnForUser, boostLottoJackpot)
 5. ✅ Updated all import paths (../../utils → ../../../../utils for nested folders)
 6. ✅ Created comprehensive README with signature-gated design explanation
-
-**Remaining Work:**
-- Testing scripts for TestNet development (3 scripts - signature generation, roll testing)
+7. ✅ Implemented 3 testing scripts (generateSignature, rollLottoTest, simulateTrade) for TestNet rolls
 
 ---
 
@@ -91,9 +89,11 @@ TestNet development tools - requires systemWallet private key
 
 | Script | Description | Usage | Status |
 |--------|-------------|-------|--------|
-| `rollLottoTest.js` | Generate signature + roll | `node testing/rollLottoTest.js <params>` | 🔨 TODO |
-| `generateSignature.js` | Create test signature | `node testing/generateSignature.js <params>` | 🔨 TODO |
-| `simulateTrade.js` | Full trade simulation | `node testing/simulateTrade.js <params>` | 🔨 TODO |
+| `generateSignature.js` | Build a systemWallet roll signature (offline) | `node testing/generateSignature.js --token <id> --serial <n> --nonce <n> [opts]` | ✅ Complete |
+| `rollLottoTest.js` | Sign + submit one roll, report outcome | `node testing/rollLottoTest.js [contractId] --token <id> --serial <n> --nonce <n> [opts]` | ✅ Complete |
+| `simulateTrade.js` | Roll both buyer + seller of one trade | `node testing/simulateTrade.js [contractId] --token <id> --serial <n> --nonce <n> [opts]` | ✅ Complete |
+
+> Testing scripts require `SIGNING_KEY` (ECDSA) in `.env` — the systemWallet that signs roll parameters. They are the in-repo stand-in for the production Lazy Secure Trade scanner. Run `generateSignature.js --help` for the full flag reference.
 
 ---
 
