@@ -53,7 +53,6 @@ contract LazyLottoPoolManager is ReentrancyGuard {
     error InvalidAddress();
     error InsufficientHbarFee(uint256 required, uint256 provided);
     error NothingToWithdraw();
-    error CannotTransferGlobalPools();
     error CannotSetManagerForGlobalPools();
     error CannotWithdrawFromGlobalPools();
     error LazyLottoAlreadySet();
@@ -128,7 +127,7 @@ contract LazyLottoPoolManager is ReentrancyGuard {
     mapping(uint256 => PoolProceeds) private poolProceeds;
     mapping(uint256 => uint256) public poolPlatformFeePercentage; // poolId => fee% at creation time
     mapping(uint256 => uint256) public poolBurnPercentage; // poolId => burn% at creation time
-    mapping(address => uint256) public pendingWithdrawals; // token => total owed to ALL owners
+    mapping(address => uint256) public pendingWithdrawals; // token => full un-withdrawn proceeds (owner share + platform cut) still reserved in Storage
     mapping(address => uint256) public platformProceedsBalance; // token => accumulated platform cut
     uint256 public platformProceedsPercentage = 5; // 5% platform rake (default)
 
@@ -324,12 +323,11 @@ contract LazyLottoPoolManager is ReentrancyGuard {
 
         poolProceeds[poolId].totalProceeds[token] += amount;
 
-        // Track global obligations (owner's share after platform cut)
-        // Use the platform fee percentage that was set when pool was created
-        uint256 poolFeePercentage = poolPlatformFeePercentage[poolId];
-        uint256 platformCut = (amount * poolFeePercentage) / 100;
-        uint256 ownerShare = amount - platformCut;
-        pendingWithdrawals[token] += ownerShare;
+        // Reserve the FULL proceeds (owner share + platform cut) as an outstanding obligation, so
+        // the platform's cut is covered by the anti-rug reserve the moment it accrues — not only
+        // when the owner later withdraws. Reserving just the owner share left the platform cut
+        // unreserved in Storage and drainable by an admin (audit Finding 3).
+        pendingWithdrawals[token] += amount;
 
         emit ProceedsRecorded(poolId, token, amount);
     }
@@ -384,9 +382,11 @@ contract LazyLottoPoolManager is ReentrancyGuard {
         uint256 platformCut = (available * poolFeePercentage) / 100;
         ownerShare = available - platformCut;
 
-        // Update state
+        // Update state: the full `available` leaves the pending reserve — the owner share is paid
+        // out (below) and the platform cut moves into platformProceedsBalance (still reserved),
+        // so the reserve drops by exactly the owner share that actually leaves Storage.
         proceeds.withdrawnProceeds[token] += available;
-        pendingWithdrawals[token] -= ownerShare; // Reduce global obligations
+        pendingWithdrawals[token] -= available;
         platformProceedsBalance[token] += platformCut;
 
         emit WithdrawalRequested(poolId, owner, token, ownerShare, platformCut);
@@ -484,14 +484,14 @@ contract LazyLottoPoolManager is ReentrancyGuard {
     function transferPoolOwnership(uint256 poolId, address newOwner) external {
         address currentOwner = poolOwners[poolId];
 
-        // Authorization: current owner or global admin
-        bool isAdmin = ILazyLotto(lazyLotto).isAdmin(msg.sender);
-        if (msg.sender != currentOwner && !isAdmin) {
+        // Authorization: ONLY the current owner may transfer. Admins cannot seize a community
+        // pool — otherwise a compromised admin could reassign ownership and drain the owner's
+        // accrued proceeds (and, if idle, its prizes via close + removePrizes).
+        if (msg.sender != currentOwner) {
             revert NotAuthorized();
         }
 
         if (newOwner == address(0)) revert InvalidAddress();
-        if (currentOwner == address(0)) revert CannotTransferGlobalPools();
 
         // Update ownership
         poolOwners[poolId] = newOwner;

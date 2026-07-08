@@ -785,13 +785,8 @@ contract LazyLottoStorage is HederaTokenServiceLite, KeyHelperLite {
             isHbarApproval = true;
         }
 
-        // hbar moves sit separate from NFT moves (max 8 NFTs + 2 hbar legs +1/-1 tiny bar)
-        IHederaTokenServiceLite.TokenTransferList[]
-            memory transfers = new IHederaTokenServiceLite.TokenTransferList[](
-                serials.length
-            );
-
-        // prep the hbar transfer (1 tinybar for discovery)
+        // prep the hbar transfer (1 tinybar for discovery). hbar legs sit separate from NFT moves
+        // (max 8 NFTs + 2 hbar legs stays within Hedera's per-tx balance/ownership-change limits).
         IHederaTokenServiceLite.TransferList memory hbarTransfer;
         hbarTransfer.transfers = new IHederaTokenServiceLite.AccountAmount[](2);
 
@@ -802,22 +797,41 @@ contract LazyLottoStorage is HederaTokenServiceLite, KeyHelperLite {
         hbarTransfer.transfers[1].accountID = senderAddress;
         hbarTransfer.transfers[1].amount = 1;
 
-        // transfer NFTs
+        // A SINGLE TokenTransferList for the collection, carrying one NftTransfer per serial.
+        // (One list per serial repeats the token ID -> TOKEN_ID_REPEATED_IN_TOKEN_LIST, which
+        // reverted every multi-serial single-collection move.) Size to the non-zero serials.
+        uint256 count;
+        for (uint256 i = 0; i < serials.length; i++) {
+            if (serials[i] != 0) {
+                unchecked {
+                    ++count;
+                }
+            }
+        }
+
+        IHederaTokenServiceLite.TokenTransferList[]
+            memory transfers = new IHederaTokenServiceLite.TokenTransferList[](
+                1
+            );
+        transfers[0].token = collectionAddress;
+        transfers[0].nftTransfers = new IHederaTokenServiceLite.NftTransfer[](
+            count
+        );
+
+        uint256 j;
         for (uint256 i = 0; i < serials.length; i++) {
             if (serials[i] == 0) {
                 continue;
             }
-
-            IHederaTokenServiceLite.NftTransfer memory nftTransfer;
-            nftTransfer.senderAccountID = senderAddress;
-            nftTransfer.receiverAccountID = receiverAddress;
-            nftTransfer.serialNumber = int64(int256(serials[i]));
-            nftTransfer.isApproval = !isHbarApproval;
-
-            transfers[i].token = collectionAddress;
-            transfers[i]
-                .nftTransfers = new IHederaTokenServiceLite.NftTransfer[](1);
-            transfers[i].nftTransfers[0] = nftTransfer;
+            transfers[0].nftTransfers[j].senderAccountID = senderAddress;
+            transfers[0].nftTransfers[j].receiverAccountID = receiverAddress;
+            transfers[0].nftTransfers[j].serialNumber = int64(
+                int256(serials[i])
+            );
+            transfers[0].nftTransfers[j].isApproval = !isHbarApproval;
+            unchecked {
+                ++j;
+            }
         }
 
         int32 responseCode = cryptoTransfer(hbarTransfer, transfers);

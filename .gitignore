@@ -48,3 +48,5 @@ SOFT_LAUNCH_PRIZE_PLAN.md
 scripts/interactions/LazyLotto/admin/recipes/*.json
 !scripts/interactions/LazyLotto/admin/recipes/lazyLounge-stage1.json
 !scripts/interactions/LazyLotto/admin/recipes/luckyDip-initial.json
+# Local mainnet migration snapshots (embargo — never commit)
+migration-snapshots/

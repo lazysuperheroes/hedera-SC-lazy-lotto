@@ -139,6 +139,11 @@ describe('LazyLotto - Deployment & Setup:', function () {
 		}
 
 		client.setOperator(operatorId, operatorKey);
+		// Lift the max transaction fee well above the SDK default. Large-contract FileAppend +
+		// ContractCreate fees are USD-priced, so a low HBAR price pushes them past the default and
+		// causes INSUFFICIENT_TX_FEE. Propagates to ContractCreateFlow + ContractExecute sub-txs.
+		// Keep <= ~21 HBAR (setDefaultMaxTransactionFee overflows the int32 tinybar cap above that).
+		client.setDefaultMaxTransactionFee(new Hbar(20));
 		console.log('\n-Using Operator:', operatorId.toString());
 
 		// Create test accounts: Alice, Bob, Carol, Admin
@@ -532,11 +537,12 @@ describe('LazyLotto - Deployment & Setup:', function () {
 		console.log('\n-Deploying contract...', contractName, '\n\tgas@', gasLimit);
 
 		// Constructor params: (lazyToken, lazyGasStation, lazyDelegateRegistry, prng, burnPercentage, storageContract)
+		// `prng` is immutable (no setPrng), so deploy with the MOCK PRNG for deterministic tests.
 		const constructorParams = new ContractFunctionParameters()
 			.addAddress(lazyTokenId.toSolidityAddress())
 			.addAddress(lazyGasStationId.toSolidityAddress())
 			.addAddress(lazyDelegateRegistryId.toSolidityAddress())
-			.addAddress(prngId.toSolidityAddress())
+			.addAddress(mockPrngId.toSolidityAddress())
 			.addUint256(LAZY_BURN_PERCENT)
 			.addAddress(storageContractAddress);
 
@@ -789,11 +795,11 @@ describe('LazyLotto - Constructor & Initial State Verification:', function () {
 		const lazyDelegateRegistryAddr = lazyLottoIface.decodeFunctionResult('lazyDelegateRegistry', result);
 		expect(lazyDelegateRegistryAddr[0].slice(2).toLowerCase()).to.be.equal(lazyDelegateRegistryId.toSolidityAddress());
 
-		// Check PRNG
+		// Check PRNG (immutable; tests deploy with the MOCK PRNG for deterministic rolls)
 		encodedCommand = lazyLottoIface.encodeFunctionData('prng');
 		result = await readOnlyEVMFromMirrorNode(env, contractId, encodedCommand, operatorId, false);
 		const prngAddr = lazyLottoIface.decodeFunctionResult('prng', result);
-		expect(prngAddr[0].slice(2).toLowerCase()).to.be.equal(prngId.toSolidityAddress());
+		expect(prngAddr[0].slice(2).toLowerCase()).to.be.equal(mockPrngId.toSolidityAddress());
 
 		// Check burn percentage
 		encodedCommand = lazyLottoIface.encodeFunctionData('burnPercentage');
@@ -2523,31 +2529,7 @@ describe('LazyLotto - Prize Claiming:', function () {
 
 		client.setOperator(operatorId, operatorKey);
 
-		const gasEstimate = await estimateGas(
-			env,
-			contractId,
-			lazyLottoIface,
-			operatorId,
-			'setPrng',
-			[mockPrngId.toSolidityAddress()],
-			300_000,
-		);
-
-		const result = await contractExecuteFunction(
-			contractId,
-			lazyLottoIface,
-			client,
-			gasEstimate.gasLimit,
-			'setPrng',
-			[mockPrngId.toSolidityAddress()],
-		);
-
-		if (result[0]?.status?.toString() !== 'SUCCESS') {
-			console.log('Set Mock PRNG failed:', result[0]?.status?.toString());
-			fail('Set Mock PRNG failed');
-		}
-
-		console.log('✓ Mock PRNG activated - all rolls will now result in wins');
+		// mock PRNG is baked in at deploy (prng is immutable) — no setPrng swap needed
 	});
 
 	after(async () => {
@@ -2556,31 +2538,7 @@ describe('LazyLotto - Prize Claiming:', function () {
 
 		client.setOperator(operatorId, operatorKey);
 
-		const gasEstimate = await estimateGas(
-			env,
-			contractId,
-			lazyLottoIface,
-			operatorId,
-			'setPrng',
-			[prngId.toSolidityAddress()],
-			300_000,
-		);
-
-		const result = await contractExecuteFunction(
-			contractId,
-			lazyLottoIface,
-			client,
-			gasEstimate.gasLimit,
-			'setPrng',
-			[prngId.toSolidityAddress()],
-		);
-
-		if (result[0]?.status?.toString() !== 'SUCCESS') {
-			console.log('Restore real PRNG failed:', result[0]?.status?.toString());
-			fail('Restore real PRNG failed');
-		}
-
-		console.log('✓ Real PRNG restored');
+		// prng is immutable now — nothing to restore
 	});
 
 	beforeEach(async () => {
@@ -2870,29 +2828,7 @@ describe('LazyLotto - Prize Transfer:', function () {
 		console.log('\n🔄 Switching to Mock PRNG for prize transfer tests...');
 		client.setOperator(operatorId, operatorKey);
 
-		const gasEstimate = await estimateGas(
-			env,
-			contractId,
-			lazyLottoIface,
-			operatorId,
-			'setPrng',
-			[mockPrngId.toSolidityAddress()],
-			300_000,
-		);
-
-		const result = await contractExecuteFunction(
-			contractId,
-			lazyLottoIface,
-			client,
-			gasEstimate.gasLimit,
-			'setPrng',
-			[mockPrngId.toSolidityAddress()],
-		);
-
-		if (result[0]?.status?.toString() !== 'SUCCESS') {
-			fail('Set Mock PRNG failed');
-		}
-		console.log('✓ Mock PRNG activated for prize transfer tests');
+		// mock PRNG is baked in at deploy (prng is immutable) — no setPrng swap needed
 	});
 
 	after(async () => {
@@ -2900,29 +2836,7 @@ describe('LazyLotto - Prize Transfer:', function () {
 		console.log('\n🔄 Restoring real PRNG...');
 		client.setOperator(operatorId, operatorKey);
 
-		const gasEstimate = await estimateGas(
-			env,
-			contractId,
-			lazyLottoIface,
-			operatorId,
-			'setPrng',
-			[prngId.toSolidityAddress()],
-			300_000,
-		);
-
-		const result = await contractExecuteFunction(
-			contractId,
-			lazyLottoIface,
-			client,
-			gasEstimate.gasLimit,
-			'setPrng',
-			[prngId.toSolidityAddress()],
-		);
-
-		if (result[0]?.status?.toString() !== 'SUCCESS') {
-			fail('Restore real PRNG failed');
-		}
-		console.log('✓ Real PRNG restored');
+		// prng is immutable now — nothing to restore
 	});
 
 	it('Should transfer a single pending prize to another wallet', async () => {
@@ -3260,31 +3174,7 @@ describe('LazyLotto - Prize NFT System:', function () {
 		// Create a pool with Mock PRNG to guarantee wins
 		client.setOperator(operatorId, operatorKey);
 
-		// Switch to Mock PRNG
-		const setPrngGas = await estimateGas(
-			env,
-			contractId,
-			lazyLottoIface,
-			operatorId,
-			'setPrng',
-			[mockPrngId.toSolidityAddress()],
-			300_000,
-		);
-
-		const setPrngResult = await contractExecuteFunction(
-			contractId,
-			lazyLottoIface,
-			client,
-			setPrngGas.gasLimit,
-			'setPrng',
-			[mockPrngId.toSolidityAddress()],
-		);
-
-		if (setPrngResult[0]?.status?.toString() !== 'SUCCESS') {
-			fail('Failed to switch to Mock PRNG');
-		}
-
-		console.log('✓ Switched to Mock PRNG for guaranteed wins');
+		// mock PRNG is baked in at deploy (prng is immutable) — no setPrng swap needed
 
 		// Create test pool
 		const createGasEstimate = await estimateGas(
@@ -3456,24 +3346,7 @@ describe('LazyLotto - Prize NFT System:', function () {
 		// Restore real PRNG
 		client.setOperator(operatorId, operatorKey);
 
-		const setPrngGas = await estimateGas(
-			env,
-			contractId,
-			lazyLottoIface,
-			operatorId,
-			'setPrng',
-			[prngId.toSolidityAddress()],
-			300_000,
-		);
-
-		await contractExecuteFunction(
-			contractId,
-			lazyLottoIface,
-			client,
-			setPrngGas.gasLimit,
-			'setPrng',
-			[prngId.toSolidityAddress()],
-		);
+		// prng is immutable now — nothing to restore
 
 		console.log('\n-Restored real PRNG');
 	});
@@ -6164,5 +6037,132 @@ describe('LazyLotto - Cleanup:', function () {
 		await Promise.all(sweepPromises);
 
 		console.log('-HBAR sweep completed');
+	});
+});
+
+// ===========================================================================================
+// REGRESSION: tx.origin roll guard vs the revert-on-loss "free re-roll" exploit (audit Finding 2)
+// ---------------------------------------------------------------------------
+// Runs as a permanent part of the suite — deploys RerollAttacker + a pool, so it adds a little
+// time/HBAR to every full run, but a guard regression can only be caught if the test actually runs.
+// Reuses the already-deployed + wired stack from the describes above (contractId, mockPrngId,
+// operatorId/Key, client, lazyLottoIface). LazyLotto carries `require(tx.origin == msg.sender)` in
+// _roll, so this asserts the guard blocks a contract-wrapped grind while a direct EOA still rolls.
+// (RerollAttacker.sol is the wrapper a caller would use to revert a losing roll and grind a win.)
+//
+// Run the whole suite:  ENVIRONMENT=TEST npx hardhat test test/LazyLotto.test.js
+// Isolate just this:     ... --grep "Deployment & Setup|WHITEHAT"
+// ===========================================================================================
+
+describe('LazyLotto - WHITEHAT: revert-on-loss free re-roll', function () {
+	const ENTRY = new Hbar(ENTRY_FEE_HBAR, HbarUnit.Tinybar); // 1 HBAR entry fee
+	const LOSS = ['99999999']; // rolls[0] = 99,999,999 >= winRate (50,000,000) -> loss
+	const WIN = ['0']; //          rolls[0] = 0 < winRate -> win
+
+	let exploitPoolId;
+	let attackerId, attackerAddress, attackerIface, mockPrngIface;
+
+	const totalPools = async () => {
+		const enc = lazyLottoIface.encodeFunctionData('totalPools');
+		const res = await readOnlyEVMFromMirrorNode(env, contractId, enc, operatorId, false);
+		return Number(lazyLottoIface.decodeFunctionResult('totalPools', res)[0]);
+	};
+	const entriesOf = async (solAddr) => {
+		await sleep(6000); // allow mirror node to catch up
+		const n = await totalPools();
+		const enc = lazyLottoIface.encodeFunctionData('getUserEntriesPage', [solAddr, 0, n]);
+		const res = await readOnlyEVMFromMirrorNode(env, contractId, enc, operatorId, false);
+		return Number(lazyLottoIface.decodeFunctionResult('getUserEntriesPage', res)[0][exploitPoolId]);
+	};
+	const setMock = async (arr) => {
+		const r = await contractExecuteFunction(mockPrngId, mockPrngIface, client, 250_000, 'setStaticArray', [arr]);
+		if (r[0]?.status?.toString() !== 'SUCCESS') fail('setStaticArray failed: ' + r[0]?.status?.toString());
+	};
+	const execLotto = async (fn, params, hbar, gas) => {
+		const r = await contractExecuteFunction(contractId, lazyLottoIface, client, gas || 2_500_000, fn, params, hbar || 0);
+		if (r[0]?.status?.toString() !== 'SUCCESS') fail(fn + ' failed: ' + r[0]?.status?.toString());
+		return r;
+	};
+	const callAttacker = (fn, params, hbar) =>
+		contractExecuteFunction(attackerId, attackerIface, client, 2_500_000, fn, params, hbar || 0);
+	const attackerReverts = async (fn, params, hbar) => {
+		try {
+			const r = await callAttacker(fn, params, hbar);
+			return r[0]?.status?.toString() !== 'SUCCESS';
+		} catch (e) {
+			return true; // threw => reverted
+		}
+	};
+
+	before(async function () {
+		client.setOperator(operatorId, operatorKey);
+
+		mockPrngIface = new ethers.Interface(
+			JSON.parse(fs.readFileSync('./artifacts/contracts/mocks/MockPrngSystemContract.sol/MockPrngSystemContract.json')).abi,
+		);
+		const attackerJson = JSON.parse(
+			fs.readFileSync('./artifacts/contracts/mocks/RerollAttacker.sol/RerollAttacker.json'),
+		);
+		attackerIface = new ethers.Interface(attackerJson.abi);
+
+		// 1. LazyLotto is deployed with the mock PRNG (immutable); win/loss is controlled via setStaticArray.
+
+		// 2. Create a dedicated HBAR-fee pool (50% win rate, 1 HBAR entry).
+		exploitPoolId = await totalPools();
+		await execLotto(
+			'createPool',
+			['Whitehat Pool', 'WHP', 'revert-reroll PoC', [], 'QmTicket', 'QmWin', WIN_RATE_THRESHOLD, ENTRY_FEE_HBAR, ZERO_ADDRESS],
+			new Hbar(MINT_PAYMENT, HbarUnit.Hbar),
+			3_500_000,
+		);
+		console.log(`\t• exploit pool id = ${exploitPoolId}`);
+
+		// 3. Stock it with 3 HBAR prizes so there is inventory to win/drain.
+		const prizes = [Number(new Hbar(1).toTinybars()), Number(new Hbar(1).toTinybars()), Number(new Hbar(1).toTinybars())];
+		await execLotto('addMultipleFungiblePrizes', [exploitPoolId, ZERO_ADDRESS, prizes], new Hbar(3), 3_000_000);
+
+		// 4. Deploy the white-hat attacker pointed at LazyLotto.
+		const params = new ContractFunctionParameters().addAddress(contractId.toSolidityAddress());
+		[attackerId] = await contractDeployFunction(client, attackerJson.bytecode, 1_800_000, params);
+		attackerAddress = attackerId.toSolidityAddress();
+		console.log(`\t• attacker contract = ${attackerId.toString()}`);
+	});
+
+	after(async function () {
+		// Reset the (possibly reused) mock PRNG to its always-win default so a later full-suite
+		// run reusing MOCK_PRNG_CONTRACT_ID isn't left in a LOSS state from this harness.
+		try { await setMock([]); } catch (e) { /* best effort */ }
+	});
+
+	it('control: a direct EOA roll cannot discard a loss (loss is final)', async function () {
+		client.setOperator(operatorId, operatorKey);
+		await execLotto('buyEntry', [exploitPoolId, 1], ENTRY, 1_500_000);
+		await setMock(LOSS);
+		const res = await execLotto('rollBatch', [exploitPoolId, 1]);
+		expect(Number(res[1][0])).to.equal(0); // wins == 0
+		expect(await entriesOf(operatorId.toSolidityAddress())).to.equal(0); // entry consumed by the loss
+		console.log('\t✓ EOA loss is final: entry consumed, no re-roll possible.');
+	});
+
+	it('tx.origin guard blocks a contract-wrapped roll while a direct EOA still rolls', async function () {
+		client.setOperator(operatorId, operatorKey);
+
+		// Attacker buys exactly ONE entry (buying is not guarded — only _roll is).
+		const bought = await callAttacker('buyEntries', [exploitPoolId, 1], ENTRY);
+		if (bought[0]?.status?.toString() !== 'SUCCESS') fail('attacker buyEntries failed: ' + bought[0]?.status?.toString());
+		expect(await entriesOf(attackerAddress)).to.equal(1);
+
+		// The contract-wrapped roll reverts at the guard even on a forced WIN, so it can never grind.
+		await setMock(WIN);
+		expect(await attackerReverts('grindRoll', [exploitPoolId, 1])).to.equal(true);
+		expect(await entriesOf(attackerAddress)).to.equal(1); // roll never happened; entry untouched
+		console.log('\t✓ Contract-wrapped roll blocked by tx.origin guard.');
+
+		// A direct EOA still rolls to a win — the legitimate path is unaffected.
+		await execLotto('buyEntry', [exploitPoolId, 1], ENTRY, 1_500_000);
+		await setMock(WIN);
+		const eoa = await execLotto('rollBatch', [exploitPoolId, 1]);
+		expect(Number(eoa[1][0])).to.equal(1);
+		console.log('\t✓ EOA roll still works.');
 	});
 });

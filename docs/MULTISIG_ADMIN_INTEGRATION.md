@@ -264,10 +264,9 @@ All 21 admin scripts in `scripts/interactions/LazyLotto/admin/` can benefit from
 - [ ] `addGlobalPrizeManager.js` - Add global prize manager
 - [ ] `manageGlobalPrizeManagers.js` - Manage prize managers
 
-### System Operations (4 scripts)
+### System Operations (3 scripts)
 - [ ] `withdrawTokens.js` - Withdraw platform fees
 - [ ] `pauseContract.js` - Pause entire contract
-- [ ] `setPrng.js` - Update PRNG contract
 - [ ] `migrateBonuses.js` - Migrate bonus configuration
 
 ### User Operations (3 scripts)
