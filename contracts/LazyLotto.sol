@@ -195,7 +195,7 @@ contract LazyLotto is ReentrancyGuard, Pausable {
 
     LazyLottoPoolManager public poolManager;
 
-    IPrngSystemContract public prng;
+    IPrngSystemContract public immutable prng;
     uint256 public burnPercentage;
 
     // HTS helper contracts
@@ -322,16 +322,6 @@ contract LazyLotto is ReentrancyGuard, Pausable {
             revert BadParameters();
         }
         burnPercentage = _burnPercentage;
-    }
-
-    /// @notice Sets the PRNG contract address (for testing purposes)
-    /// @param _prng The address of the new PRNG contract
-    function setPrng(address _prng) external {
-        _requireAdmin();
-        if (_prng == address(0)) {
-            revert BadParameters();
-        }
-        prng = IPrngSystemContract(_prng);
     }
 
     /// Initializes a fresh Lotto pool with the given parameters
@@ -723,6 +713,11 @@ contract LazyLotto is ReentrancyGuard, Pausable {
     ) external whenNotPaused nonReentrant returns (int64[] memory serials) {
         _requireAdmin();
         _requireValidPool(poolId);
+        // Admin free entries are limited to global (team-owned) pools — never a community pool
+        // whose prizes were funded by a third-party owner.
+        if (poolManager.getPoolOwner(poolId) != address(0)) {
+            revert NotAuthorized();
+        }
         _buyEntry(poolId, ticketCount, true, msg.sender);
         return _redeemEntriesToNFT(poolId, ticketCount);
     }
@@ -738,6 +733,11 @@ contract LazyLotto is ReentrancyGuard, Pausable {
     ) external whenNotPaused nonReentrant {
         _requireAdmin();
         _requireValidPool(poolId);
+        // Admin free entries are limited to global (team-owned) pools — never a community pool
+        // whose prizes were funded by a third-party owner.
+        if (poolManager.getPoolOwner(poolId) != address(0)) {
+            revert NotAuthorized();
+        }
         if (recipient == address(0)) {
             revert BadParameters();
         }
@@ -1483,6 +1483,14 @@ contract LazyLotto is ReentrancyGuard, Pausable {
         uint256 poolId,
         uint256 numberToRoll
     ) internal returns (uint256 wins, uint256 offset) {
+        // EOA-only guard: the roll outcome is drawn and returned in the same transaction, so a
+        // contract caller could inspect the result and revert on a loss to re-roll for free. An EOA
+        // cannot observe-then-revert within its own atomic tx; requiring tx.origin == msg.sender
+        // blocks contract wrappers (incl. the constructor-callback bypass, where code.length is 0).
+        if (tx.origin != msg.sender) {
+            revert NotAuthorized();
+        }
+
         uint32 boostBps = poolManager.calculateBoost(msg.sender);
 
         LottoPool storage p = pools[poolId];
@@ -1575,22 +1583,23 @@ contract LazyLotto is ReentrancyGuard, Pausable {
     }
 
     function _claimPrize(uint256 pkgIdx) internal {
-        PendingPrize[] memory userPending = pending[msg.sender];
-        if (userPending.length == 0) {
+        // Read length + the single element straight from storage (no whole-array memory copy),
+        // so one claim stays O(1) regardless of how many prizes are pending (claimAllPrizes O(n)).
+        PendingPrize[] storage userPending = pending[msg.sender];
+        uint256 len = userPending.length;
+        if (len == 0) {
             revert NoPendingPrizes();
         }
 
         // check the user has a pending prize at this index
-        if (pkgIdx >= userPending.length) {
+        if (pkgIdx >= len) {
             revert BadParameters();
         }
 
-        // get the prize from the array and remove it
+        // get the prize from the array and remove it (swap-pop)
         PendingPrize memory claimedPrize = userPending[pkgIdx];
-        pending[msg.sender][pkgIdx] = pending[msg.sender][
-            pending[msg.sender].length - 1
-        ];
-        pending[msg.sender].pop();
+        userPending[pkgIdx] = userPending[len - 1];
+        userPending.pop();
 
         emit PrizeClaimed(msg.sender, claimedPrize.prize);
 

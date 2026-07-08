@@ -978,13 +978,7 @@ async function setBurnPercentage(percentage) {
 
 ### PRNG Configuration
 
-```javascript
-// Set PRNG contract address (Hedera's VRF)
-async function setPrngAddress(prngContractId) {
-  const tx = await contract.setPrng(prngContractId);
-  await tx.wait();
-}
-```
+The PRNG contract is **immutable** — set once in the LazyLotto constructor and unchangeable after deployment (there is no `setPrng`). Pointing at a different PRNG requires redeploying LazyLotto; there is no admin action or UI for it.
 
 ### Platform Config Dashboard
 
@@ -1045,7 +1039,7 @@ function PlatformConfigDashboard() {
         <ContractAddressDisplay
           label="PRNG Contract"
           address={config.prngAddress}
-          onEdit={setPrngAddress}
+          editable={false}
         />
         <ContractAddressDisplay
           label="Storage Contract"
@@ -1841,7 +1835,6 @@ function AdminOverviewDashboard() {
 | `setBurnPercentage.js` | Set $LAZY burn percentage | Yes |
 | `setPlatformFee.js` | Set platform proceeds % | Yes |
 | `setCreationFees.js` | Set pool creation fees | Yes |
-| `setPrng.js` | Set PRNG contract address | Yes |
 | `withdrawTokens.js` | Withdraw platform proceeds | Yes |
 | `transferPoolOwnership.js` | Transfer community pool ownership | Yes |
 | `grantEntry.js` | Grant free entries to users | Yes |
@@ -1895,7 +1888,6 @@ setTimeBonus(uint256 index, uint256 start, uint256 end, uint32 bps) external
 setNFTBonus(address token, uint32 bps) external
 setLazyBalanceBonus(uint256 threshold, uint32 bps) external
 setBurnPercentage(uint256 percentage) external
-setPrng(address prngContract) external
 
 // Financial
 transferHbarFromStorage(address recipient, uint256 amount) external
