@@ -58,6 +58,10 @@ node scripts/interactions/LazyLotto/user/buyEntry.js 0.0.CONTRACT_ID [poolId] [c
 
 See `scripts/interactions/README.md` for complete script documentation (41 scripts organized by contract).
 
+## In-Progress Work
+
+`LAZY_HARDENING_ROADMAP.md` is the starting point for the October 2026 EOA-guard / HIP-1340 (EIP-7702) hardening across Lazy contracts: status board, per-workstream steps and pick-up prompts. Check it before changing any roll/mint guard.
+
 ## Architecture Overview
 
 ### Core Contract Hierarchy

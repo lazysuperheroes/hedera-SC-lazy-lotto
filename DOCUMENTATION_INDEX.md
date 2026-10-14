@@ -2,6 +2,8 @@
 
 This index provides a comprehensive overview of all documentation for the LazyLotto smart contract system. Use this as a starting point for understanding the project structure, implementation patterns, and integration approaches.
 
+> **In-progress security work:** [LAZY_HARDENING_ROADMAP.md](./LAZY_HARDENING_ROADMAP.md) tracks the EOA-guard / HIP-1340 (EIP-7702) hardening across LazyLotto, LazyTradeLotto, the Mission template and the minters, with pick-up prompts per workstream.
+
 ---
 
 ## Quick Links by Audience
