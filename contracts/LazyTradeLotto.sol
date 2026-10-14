@@ -440,12 +440,16 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
                 maxWinAmt + nonce
             );
 
-            // pay the winner
-            recordPayout(winAmt);
-            lazyGasStation.payoutLazy(msg.sender, winAmt, burn);
+            // A zero draw (possible when minWinAmt == 0) pays nothing: LazyGasStation rejects
+            // zero payouts, and reverting would re-arm the ticket for a fresh draw.
+            if (winAmt > 0) {
+                // pay the winner
+                recordPayout(winAmt);
+                lazyGasStation.payoutLazy(msg.sender, winAmt, burn);
 
-            totalWins += 1;
-            totalPaid += winAmt;
+                totalWins += 1;
+                totalPaid += winAmt;
+            }
         }
         return winAmt;
     }
@@ -462,7 +466,9 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
         uint256 randomRoll,
         uint256 burn
     ) private {
-        if (jackpotThreshold >= randomRoll) {
+        // An empty pool (only possible with lottoLossIncrement == 0) is not a win: LazyGasStation
+        // rejects zero payouts, and reverting would re-arm the ticket for a fresh draw.
+        if (jackpotThreshold >= randomRoll && jackpotPool > 0) {
             // we have a jackpot winner!
             uint256 jackpotAmt = jackpotPool;
 

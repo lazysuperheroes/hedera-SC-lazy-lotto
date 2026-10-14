@@ -17,6 +17,7 @@ LazyTradeLotto v2 is a fresh deployment; v1 signatures and the v1 `rollLotto` ca
 - **Signed roll message** now binds `address(this)` and `block.chainid` and includes `burnExempt` and the deadline, so a signature is valid for one contract on one network for a limited time (audit TL-02).
 - **Burn exemption is signed, not looked up**: the signer decides whether the roller is an LSH holder or valid delegate. The contract no longer reads LSH balances or LazyDelegateRegistry on wins, so a broken dependency can't block payouts (TL-04) and stale delegations no longer grant 0% burn (TL-05).
 - **`boostJackpot`** clamps the pool to `maxJackpotPool` and emits `JackpotUpdate` with the new total instead of the boost amount (TL-06).
+- **Zero-amount payouts are skipped instead of reverting**: a regular win that draws 0 (possible when `minWinAmt` is 0) or a jackpot hit on an empty pool (possible with `lottoLossIncrement` 0) now completes without paying. Previously LazyGasStation rejected the zero payout, which reverted the roll and let the ticket be rolled again.
 - **Constructor** is now `(prng, lazyGasStation, systemWallet, initialJackpot, lossIncrement, burnPercentage, maxWinAmtCap, payoutWindowCap)`. The LSH collections and delegate registry are gone. `deployLazyTradeLotto.js` / `lazyLottoDeployAll.js` read `LOTTO_MAX_WIN_CAP` and `LOTTO_PAYOUT_WINDOW_CAP` (whole $LAZY).
 
 ### Removed
