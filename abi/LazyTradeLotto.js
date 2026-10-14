@@ -16,26 +16,6 @@ module.exports = [
       },
       {
         "internalType": "address",
-        "name": "_lazyDelegateRegistry",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "_lshGen1",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "_lshGen2",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "_lshGen1Mutant",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
         "name": "_systemWallet",
         "type": "address"
       },
@@ -52,6 +32,16 @@ module.exports = [
       {
         "internalType": "uint256",
         "name": "_burnPercentage",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "_maxWinAmtCap",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "_payoutWindowCap",
         "type": "uint256"
       }
     ],
@@ -82,6 +72,21 @@ module.exports = [
   {
     "inputs": [],
     "name": "InvalidUserSignature",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "OnlyEOA",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "PayoutCapReached",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "SignatureExpired",
     "type": "error"
   },
   {
@@ -289,46 +294,20 @@ module.exports = [
   },
   {
     "inputs": [],
-    "name": "LSH_GEN1",
-    "outputs": [
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "LSH_GEN1_MUTANT",
-    "outputs": [
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "LSH_GEN2",
-    "outputs": [
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "MAX_WIN_RATE_THRESHOLD",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "PAYOUT_WINDOW",
     "outputs": [
       {
         "internalType": "uint256",
@@ -355,25 +334,6 @@ module.exports = [
   {
     "inputs": [],
     "name": "burnPercentage",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "_user",
-        "type": "address"
-      }
-    ],
-    "name": "getBurnForUser",
     "outputs": [
       {
         "internalType": "uint256",
@@ -427,6 +387,103 @@ module.exports = [
         "internalType": "uint256",
         "name": "_maxJackpotPool",
         "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "getPayoutWindow",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "start",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paid",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "cap",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "remaining",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "roller",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "serial",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "nonce",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bool",
+        "name": "buyer",
+        "type": "bool"
+      },
+      {
+        "internalType": "uint256",
+        "name": "winRateThreshold",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "minWinAmt",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "maxWinAmt",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "jackpotThreshold",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bool",
+        "name": "burnExempt",
+        "type": "bool"
+      },
+      {
+        "internalType": "uint256",
+        "name": "deadline",
+        "type": "uint256"
+      }
+    ],
+    "name": "getRollMessageHash",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
       }
     ],
     "stateMutability": "view",
@@ -505,19 +562,6 @@ module.exports = [
   },
   {
     "inputs": [],
-    "name": "lazyDelegateRegistry",
-    "outputs": [
-      {
-        "internalType": "contract ILazyDelegateRegistry",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "lazyGasStation",
     "outputs": [
       {
@@ -545,6 +589,19 @@ module.exports = [
   {
     "inputs": [],
     "name": "maxJackpotPool",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "maxWinAmtCap",
     "outputs": [
       {
         "internalType": "uint256",
@@ -590,6 +647,45 @@ module.exports = [
   },
   {
     "inputs": [],
+    "name": "payoutWindowCap",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "payoutWindowPaid",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "payoutWindowStart",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "prngSystemContract",
     "outputs": [
       {
@@ -606,6 +702,19 @@ module.exports = [
     "name": "renounceOwnership",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "requireCodelessCaller",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -651,12 +760,35 @@ module.exports = [
         "type": "uint256"
       },
       {
+        "internalType": "bool",
+        "name": "burnExempt",
+        "type": "bool"
+      },
+      {
+        "internalType": "uint256",
+        "name": "deadline",
+        "type": "uint256"
+      },
+      {
         "internalType": "bytes",
         "name": "teamSignature",
         "type": "bytes"
       }
     ],
     "name": "rollLotto",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bool",
+        "name": "enabled",
+        "type": "bool"
+      }
+    ],
+    "name": "setRequireCodelessCaller",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -786,6 +918,32 @@ module.exports = [
       }
     ],
     "name": "updateMaxJackpotPool",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "cap",
+        "type": "uint256"
+      }
+    ],
+    "name": "updateMaxWinAmtCap",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "cap",
+        "type": "uint256"
+      }
+    ],
+    "name": "updatePayoutWindowCap",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

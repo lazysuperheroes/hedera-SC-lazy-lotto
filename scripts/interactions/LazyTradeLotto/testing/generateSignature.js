@@ -5,21 +5,23 @@
  * signature is produced by the off-chain Lazy Secure Trade scanner; on TestNet
  * this script lets you sign rolls yourself using the SIGNING_KEY in .env.
  *
- * The contract recovers the signer from:
+ * The v2 contract recovers the signer from (see LazyTradeLotto.getRollMessageHash):
  *   keccak256(abi.encodePacked(
+ *     address(this), block.chainid,
  *     msg.sender, token, serial, nonce, buyer,
- *     winRateThreshold, minWinAmt, maxWinAmt, jackpotThreshold))
+ *     winRateThreshold, minWinAmt, maxWinAmt, jackpotThreshold, burnExempt, deadline))
  * wrapped with the EIP-191 personal_sign prefix (ECDSA.toEthSignedMessageHash).
  * The recovered address MUST equal the contract's `systemWallet`.
  *
- * IMPORTANT: the signature binds `msg.sender` (the roller). The account that
- * submits rollLotto MUST be the same address passed as --roller here.
+ * IMPORTANT: the signature binds `msg.sender` (the roller), the lotto contract and
+ * the network. The account that submits rollLotto MUST be the --roller here, to the
+ * same --contract, before the deadline.
  *
  * Usage:
  *   node scripts/interactions/LazyTradeLotto/testing/generateSignature.js \
  *     --token 0.0.789 --serial 42 --nonce 1000 --buyer true \
  *     --winRate 50000000 --minWin 5 --maxWin 20 --jackpotRate 5000000 \
- *     [--roller 0.0.1234 | 0xabc...] [--rawAmounts]
+ *     [--burnExempt false] [--contract 0.0.5678] [--ttl 600] [--roller 0.0.1234 | 0xabc...] [--rawAmounts]
  *
  * Flags (all support --name value or --name=value):
  *   --token        NFT collection from the trade (0.0.x or 0x EVM address)   [required]
@@ -31,9 +33,13 @@
  *   --maxWin       Max regular prize, in WHOLE $LAZY (converted by decimals)  [default: 20]
  *   --jackpotRate  Jackpot threshold, out of 100,000,000             [default: 5000000]
  *   --roller       Address that will submit the roll (default: .env ACCOUNT_ID)
+ *   --burnExempt   true = roller pays 0% burn (LSH holder / valid delegate; see queries/getUserBurn.js) [default: false]
+ *   --contract     LazyTradeLotto the signature is for (default: .env LAZY_TRADE_LOTTO_CONTRACT_ID)
+ *   --ttl          Seconds until the signature expires (deadline = now + ttl)  [default: 600]
  *   --rawAmounts   Treat --minWin/--maxWin as raw base units (skip decimal conversion)
  *
- * Env: SIGNING_KEY (ECDSA), ACCOUNT_ID (default roller), LAZY_DECIMALS (default 1)
+ * Env: SIGNING_KEY (ECDSA), ACCOUNT_ID (default roller), LAZY_TRADE_LOTTO_CONTRACT_ID,
+ *      ENVIRONMENT (selects the chain id), LAZY_DECIMALS (default 1)
  */
 
 require('dotenv').config();
@@ -41,6 +47,23 @@ const { AccountId, TokenId } = require('@hashgraph/sdk');
 const { ethers } = require('ethers');
 
 const MAX_WIN_RATE_THRESHOLD = 100_000_000n;
+
+// block.chainid per Hedera network, keyed by the ENVIRONMENT values the scripts accept
+const CHAIN_IDS = {
+	main: 295n,
+	mainnet: 295n,
+	test: 296n,
+	testnet: 296n,
+	preview: 297n,
+	previewnet: 297n,
+	local: 298n,
+};
+
+function chainIdFor(env) {
+	const id = CHAIN_IDS[(env || '').toLowerCase()];
+	if (id === undefined) throw new Error(`Unknown ENVIRONMENT for chain id: ${env}`);
+	return id;
+}
 
 /**
  * Parse `--name value`, `--name=value` and bare positional args.
@@ -168,6 +191,8 @@ function toEvmAddress(value, label) {
  */
 async function buildRollSignature({
 	signingKey,
+	contract,
+	chainId,
 	roller,
 	token,
 	serial,
@@ -177,13 +202,15 @@ async function buildRollSignature({
 	minWinAmt,
 	maxWinAmt,
 	jackpotThreshold,
+	burnExempt,
+	deadline,
 }) {
 	const key = signingKey.startsWith('0x') ? signingKey : `0x${signingKey}`;
 	const signer = new ethers.Wallet(key);
 
 	const messageHash = ethers.solidityPackedKeccak256(
-		['address', 'address', 'uint256', 'uint256', 'bool', 'uint256', 'uint256', 'uint256', 'uint256'],
-		[roller, token, serial, nonce, buyer, winRateThreshold, minWinAmt, maxWinAmt, jackpotThreshold],
+		['address', 'uint256', 'address', 'address', 'uint256', 'uint256', 'bool', 'uint256', 'uint256', 'uint256', 'uint256', 'bool', 'uint256'],
+		[contract, chainId, roller, token, serial, nonce, buyer, winRateThreshold, minWinAmt, maxWinAmt, jackpotThreshold, burnExempt, deadline],
 	);
 
 	// signMessage applies the EIP-191 personal_sign prefix == ECDSA.toEthSignedMessageHash
@@ -193,7 +220,7 @@ async function buildRollSignature({
 		signature,
 		signerAddress: signer.address,
 		messageHash,
-		params: { roller, token, serial, nonce, buyer, winRateThreshold, minWinAmt, maxWinAmt, jackpotThreshold },
+		params: { contract, chainId, roller, token, serial, nonce, buyer, winRateThreshold, minWinAmt, maxWinAmt, jackpotThreshold, burnExempt, deadline },
 	};
 }
 
@@ -203,6 +230,17 @@ function resolveRollParams(flags) {
 	if (!signingKey) throw new Error('SIGNING_KEY missing from .env (must be an ECDSA key)');
 
 	const lazyDecimals = Number(process.env.LAZY_DECIMALS ?? 1);
+
+	// SDK-deployed contracts use the long-zero address for address(this); pass --contract 0x.. if
+	// the lotto was created through the EVM (its mirror-node evm_address differs from long-zero)
+	const contractSrc = flags.contract || process.env.LAZY_TRADE_LOTTO_CONTRACT_ID;
+	if (!contractSrc) throw new Error('No contract: pass --contract or set LAZY_TRADE_LOTTO_CONTRACT_ID in .env');
+	const contract = toEvmAddress(contractSrc, 'contract');
+	const chainId = chainIdFor(process.env.ENVIRONMENT);
+
+	const ttl = Number(flags.ttl ?? 600);
+	if (!Number.isInteger(ttl) || ttl <= 0) throw new Error('--ttl must be a positive number of seconds');
+	const deadline = BigInt(Math.floor(Date.now() / 1000) + ttl);
 
 	const rollerSrc = flags.roller || process.env.ACCOUNT_ID;
 	if (!rollerSrc) throw new Error('No roller: pass --roller or set ACCOUNT_ID in .env');
@@ -218,6 +256,7 @@ function resolveRollParams(flags) {
 	const nonce = BigInt(flags.nonce);
 
 	const buyer = String(flags.buyer ?? 'true').toLowerCase() === 'true';
+	const burnExempt = String(flags.burnExempt ?? 'false').toLowerCase() === 'true';
 
 	const winRateThreshold = BigInt(flags.winRate ?? 50_000_000);
 	const jackpotThreshold = BigInt(flags.jackpotRate ?? 5_000_000);
@@ -231,7 +270,7 @@ function resolveRollParams(flags) {
 	if (maxWinAmt === 0n) throw new Error('--maxWin must be > 0');
 	if (minWinAmt > maxWinAmt) throw new Error('--minWin cannot exceed --maxWin');
 
-	return { signingKey, lazyDecimals, roller, token, serial, nonce, buyer, winRateThreshold, minWinAmt, maxWinAmt, jackpotThreshold };
+	return { signingKey, lazyDecimals, contract, chainId, roller, token, serial, nonce, buyer, winRateThreshold, minWinAmt, maxWinAmt, jackpotThreshold, burnExempt, deadline };
 }
 
 async function main() {
@@ -248,6 +287,7 @@ async function main() {
 	console.log('\n═══════════════════════════════════════════════════════════');
 	console.log('        LazyTradeLotto - Roll Signature');
 	console.log('═══════════════════════════════════════════════════════════\n');
+	console.log('Contract:           ', p.contract, `(chain id ${p.chainId})`);
 	console.log('Roller (msg.sender):', p.roller);
 	console.log('Token:              ', p.token);
 	console.log('Serial:             ', p.serial.toString());
@@ -257,6 +297,8 @@ async function main() {
 	console.log('Min Win (raw):      ', p.minWinAmt.toString());
 	console.log('Max Win (raw):      ', p.maxWinAmt.toString());
 	console.log('Jackpot Threshold:  ', p.jackpotThreshold.toString(), `(${Number(p.jackpotThreshold) / 1_000_000}% chance)`);
+	console.log('Burn exempt:        ', p.burnExempt);
+	console.log('Deadline:           ', p.deadline.toString(), `(${new Date(Number(p.deadline) * 1000).toISOString()})`);
 	console.log('\nRecovered signer:   ', result.signerAddress);
 	console.log('  -> this MUST equal the contract systemWallet (check getLottoInfo.js)');
 	console.log('\nSignature:');
@@ -277,13 +319,17 @@ function fs_help() {
 		'  --maxWin <n>           Max prize in whole $LAZY        [default: 20]',
 		'  --jackpotRate <n>      Jackpot threshold /100,000,000  [default: 5000000]',
 		'  --roller <0.0.x|0x..>  Roller address (default: .env ACCOUNT_ID)',
+		'  --contract <0.0.x|0x..> LazyTradeLotto to sign for (default: .env LAZY_TRADE_LOTTO_CONTRACT_ID)',
+		'  --ttl <seconds>        Signature lifetime                [default: 600]',
+		'  --burnExempt <bool>    Roller pays 0% burn (LSH holder / valid delegate) [default: false]',
 		'  --rawAmounts           Treat min/max as raw base units (no decimal scaling)',
 		'',
-		'Requires SIGNING_KEY (ECDSA) in .env. Output binds msg.sender == roller.',
+		'Requires SIGNING_KEY (ECDSA) in .env. Output binds msg.sender == roller, the contract,',
+		'the network (ENVIRONMENT), burnExempt and the deadline; rollLotto must pass the same values.',
 	].join('\n');
 }
 
-module.exports = { buildRollSignature, resolveRollParams, parseArgs, parseFlags, toEvmAddress, isTokenAssociated, parseRollOutcome, MAX_WIN_RATE_THRESHOLD };
+module.exports = { buildRollSignature, resolveRollParams, parseArgs, parseFlags, toEvmAddress, isTokenAssociated, parseRollOutcome, chainIdFor, MAX_WIN_RATE_THRESHOLD };
 
 if (require.main === module) {
 	main()

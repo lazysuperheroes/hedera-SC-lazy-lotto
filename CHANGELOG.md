@@ -5,6 +5,32 @@ All notable changes to the LazyLotto smart contract project will be documented i
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - LazyTradeLotto v2
+
+### 🔴 BREAKING CHANGES
+
+LazyTradeLotto v2 is a fresh deployment; v1 signatures and the v1 `rollLotto` call do not work against it. Signer and client changes are in [LazyTradeLotto-V2_SIGNER_GUIDE.md](./LazyTradeLotto-V2_SIGNER_GUIDE.md).
+
+### Changed
+
+- **`rollLotto`** takes two new arguments before `teamSignature`: `bool burnExempt` and `uint256 deadline`; rolls after the deadline revert `SignatureExpired()`.
+- **Signed roll message** now binds `address(this)` and `block.chainid` and includes `burnExempt` and the deadline, so a signature is valid for one contract on one network for a limited time (audit TL-02).
+- **Burn exemption is signed, not looked up**: the signer decides whether the roller is an LSH holder or valid delegate. The contract no longer reads LSH balances or LazyDelegateRegistry on wins, so a broken dependency can't block payouts (TL-04) and stale delegations no longer grant 0% burn (TL-05).
+- **`boostJackpot`** clamps the pool to `maxJackpotPool` and emits `JackpotUpdate` with the new total instead of the boost amount (TL-06).
+- **Constructor** is now `(prng, lazyGasStation, systemWallet, initialJackpot, lossIncrement, burnPercentage, maxWinAmtCap, payoutWindowCap)`. The LSH collections and delegate registry are gone. `deployLazyTradeLotto.js` / `lazyLottoDeployAll.js` read `LOTTO_MAX_WIN_CAP` and `LOTTO_PAYOUT_WINDOW_CAP` (whole $LAZY).
+
+### Removed
+
+- `getBurnForUser`, `LSH_GEN1`, `LSH_GEN2`, `LSH_GEN1_MUTANT`, `lazyDelegateRegistry`.
+
+### Added
+
+- **`maxWinAmtCap` / `updateMaxWinAmtCap`**: owner-settable upper bound on the signed `maxWinAmt` (TL-03).
+- **24h payout cap**: `payoutWindowCap` / `updatePayoutWindowCap` / `getPayoutWindow()`. Regular wins plus jackpots per 24h window; a win that would exceed it reverts `PayoutCapReached()`. Bounds total loss from a leaked signer across many rolls (TL-03).
+- **EOA-only rolls**: `rollLotto` reverts `OnlyEOA()` unless `tx.origin == msg.sender`, an on-chain backstop for the signer's EOA-only rule (TL-01). `setRequireCodelessCaller(true)` also requires `msg.sender.code.length == 0`, rejecting HIP-1340 / EIP-7702 delegated EOAs. It is off by default, to be enabled once validated on testnet, with no redeploy.
+- **`getRollMessageHash(...)`**: the exact digest the contract verifies, for signer parity checks.
+- Scripts: `admin/updateMaxWinCap.js`, `admin/updatePayoutWindowCap.js`, `admin/setRequireCodelessCaller.js`; `queries/getUserBurn.js` is now the reference off-chain burn-exemption resolver; `getLottoInfo.js` shows the caps, payout window and caller policy; the `testing/` scripts sign the v2 format (`--contract`, `--ttl`, `--burnExempt`) and `rollLottoTest.js` pre-flights digest parity, the win cap, the payout window and the resolved exemption. Test mocks `contracts/mocks/CallForwarder.sol`, `contracts/mocks/MockLazyGasStation.sol`.
+
 ## [2.1.0] - 2025-12-02
 
 ### 🔴 BREAKING CHANGES

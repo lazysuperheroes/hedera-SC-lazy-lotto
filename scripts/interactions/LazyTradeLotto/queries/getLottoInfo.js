@@ -2,10 +2,11 @@
  * LazyTradeLotto - Get Complete Lottery Information
  *
  * Displays comprehensive information about the LazyTradeLotto contract:
- * - LSH NFT tokens (Gen1, Gen2, Mutant)
- * - Connected contracts (PRNG, LazyGasStation, LazyDelegateRegistry)
+ * - Connected contracts (PRNG, LazyGasStation)
  * - Configuration (systemWallet, burnPercentage, pause status)
+ * - v2 safety limits (max win cap, 24h payout window, codeless-caller requirement)
  * - Lottery statistics (jackpot, wins, payouts, etc.)
+ * Pre-v2 contracts also show their on-chain LSH collections and LazyDelegateRegistry.
  *
  * Usage: node queries/getLottoInfo.js <contractId> [--json]
  * Example: node queries/getLottoInfo.js 0.0.123456
@@ -15,6 +16,7 @@
  */
 
 require('dotenv').config();
+const { ethers } = require('ethers');
 const {
 	AccountId,
 	ContractId,
@@ -73,15 +75,26 @@ async function main() {
 	// Fetch all contract data
 	console.log('Fetching contract data...\n');
 
-	// LSH Tokens
-	const lshGen1Result = await queryContract(env, contractId, ltlIface, 'LSH_GEN1', [], operatorId);
-	const lshGen1 = lshGen1Result[0];
-
-	const lshGen2Result = await queryContract(env, contractId, ltlIface, 'LSH_GEN2', [], operatorId);
-	const lshGen2 = lshGen2Result[0];
-
-	const lshMutantResult = await queryContract(env, contractId, ltlIface, 'LSH_GEN1_MUTANT', [], operatorId);
-	const lshMutant = lshMutantResult[0];
+	// getters that only exist on one contract version resolve to null on the other
+	const tryQuery = async (fn, iface = ltlIface) => {
+		try {
+			return await queryContract(env, contractId, iface, fn, [], operatorId);
+		}
+		catch {
+			return null;
+		}
+	};
+	// pre-v2 only: on-chain LSH exemption lookups (v2 signs the exemption per roll)
+	const v1Iface = new ethers.Interface([
+		'function LSH_GEN1() view returns (address)',
+		'function LSH_GEN2() view returns (address)',
+		'function LSH_GEN1_MUTANT() view returns (address)',
+		'function lazyDelegateRegistry() view returns (address)',
+	]);
+	const lshGen1 = (await tryQuery('LSH_GEN1', v1Iface))?.[0] ?? null;
+	const lshGen2 = (await tryQuery('LSH_GEN2', v1Iface))?.[0] ?? null;
+	const lshMutant = (await tryQuery('LSH_GEN1_MUTANT', v1Iface))?.[0] ?? null;
+	const ldrContract = (await tryQuery('lazyDelegateRegistry', v1Iface))?.[0] ?? null;
 
 	// Connected Contracts
 	const prngResult = await queryContract(env, contractId, ltlIface, 'prngSystemContract', [], operatorId);
@@ -90,8 +103,6 @@ async function main() {
 	const lgsResult = await queryContract(env, contractId, ltlIface, 'lazyGasStation', [], operatorId);
 	const lgsContract = lgsResult[0];
 
-	const ldrResult = await queryContract(env, contractId, ltlIface, 'lazyDelegateRegistry', [], operatorId);
-	const ldrContract = ldrResult[0];
 
 	// Configuration
 	const systemWalletResult = await queryContract(env, contractId, ltlIface, 'systemWallet', [], operatorId);
@@ -102,6 +113,18 @@ async function main() {
 
 	const isPausedResult = await queryContract(env, contractId, ltlIface, 'isPaused', [], operatorId);
 	const isPaused = isPausedResult[0];
+
+	// v2 only: payout limits and caller policy (pre-v2 contracts have no such getters)
+	const maxWinCapResult = await tryQuery('maxWinAmtCap');
+	const maxWinCap = maxWinCapResult ? Number(maxWinCapResult[0]) / (10 ** lazyTokenDecimals) : null;
+	const windowResult = await tryQuery('getPayoutWindow');
+	const payoutWindow = windowResult ? {
+		paid: Number(windowResult[1]) / (10 ** lazyTokenDecimals),
+		cap: Number(windowResult[2]) / (10 ** lazyTokenDecimals),
+		remaining: Number(windowResult[3]) / (10 ** lazyTokenDecimals),
+	} : null;
+	const codelessResult = await tryQuery('requireCodelessCaller');
+	const requireCodelessCaller = codelessResult ? codelessResult[0] : null;
 
 	// Lottery Statistics
 	const lottoStats = await queryContract(env, contractId, ltlIface, 'getLottoStats', [], operatorId);
@@ -123,16 +146,19 @@ async function main() {
 			contract: contractId.toString(),
 			status: isPaused ? 'paused' : 'active',
 			burnPercentage: Number(burnPercentage),
+			maxWinCap: maxWinCap,
+			payoutWindow: payoutWindow,
+			requireCodelessCaller: requireCodelessCaller,
 			systemWallet: systemWallet,
-			lshTokens: {
+			lshTokens: lshGen1 ? {
 				gen1: TokenId.fromSolidityAddress(lshGen1).toString(),
 				gen2: TokenId.fromSolidityAddress(lshGen2).toString(),
 				gen1Mutant: TokenId.fromSolidityAddress(lshMutant).toString(),
-			},
+			} : null,
 			connectedContracts: {
 				prng: ContractId.fromSolidityAddress(prngContract).toString(),
 				lazyGasStation: ContractId.fromSolidityAddress(lgsContract).toString(),
-				lazyDelegateRegistry: ContractId.fromSolidityAddress(ldrContract).toString(),
+				lazyDelegateRegistry: ldrContract ? ContractId.fromSolidityAddress(ldrContract).toString() : null,
 			},
 			statistics: {
 				jackpot: jackpotPool,
@@ -169,13 +195,28 @@ async function main() {
 		console.log('Burn Percentage:', Number(burnPercentage) + '%');
 		console.log('System Wallet:', systemWallet);
 
-		console.log('\n───────────────────────────────────────────────────────────');
-		console.log('  LSH NFT Collections (0% Burn for Holders)');
-		console.log('───────────────────────────────────────────────────────────\n');
+		if (maxWinCap !== null) {
+			console.log('\n───────────────────────────────────────────────────────────');
+			console.log('  Payout Limits & Caller Policy (v2)');
+			console.log('───────────────────────────────────────────────────────────\n');
 
-		console.log('LSH Gen1:', TokenId.fromSolidityAddress(lshGen1).toString());
-		console.log('LSH Gen2:', TokenId.fromSolidityAddress(lshGen2).toString());
-		console.log('LSH Gen1 Mutant:', TokenId.fromSolidityAddress(lshMutant).toString());
+			console.log('Max Win Cap (per roll):', maxWinCap.toLocaleString(), '$LAZY');
+			console.log('Payout Window Cap (24h):', payoutWindow.cap.toLocaleString(), '$LAZY');
+			console.log('   Paid in current window:', payoutWindow.paid.toLocaleString(), '$LAZY');
+			console.log('   Remaining:', payoutWindow.remaining.toLocaleString(), '$LAZY');
+			console.log('Require codeless caller (HIP-1340):', requireCodelessCaller ? 'ON' : 'off');
+			console.log('Burn exemption: signed per roll by the system wallet (LSH holder / valid delegate)');
+		}
+
+		if (lshGen1) {
+			console.log('\n───────────────────────────────────────────────────────────');
+			console.log('  LSH NFT Collections (pre-v2: on-chain 0% burn lookup)');
+			console.log('───────────────────────────────────────────────────────────\n');
+
+			console.log('LSH Gen1:', TokenId.fromSolidityAddress(lshGen1).toString());
+			console.log('LSH Gen2:', TokenId.fromSolidityAddress(lshGen2).toString());
+			console.log('LSH Gen1 Mutant:', TokenId.fromSolidityAddress(lshMutant).toString());
+		}
 
 		console.log('\n───────────────────────────────────────────────────────────');
 		console.log('  Connected Contracts');
@@ -183,7 +224,7 @@ async function main() {
 
 		console.log('PRNG System:', ContractId.fromSolidityAddress(prngContract).toString());
 		console.log('Lazy Gas Station:', ContractId.fromSolidityAddress(lgsContract).toString());
-		console.log('Lazy Delegate Registry:', ContractId.fromSolidityAddress(ldrContract).toString());
+		if (ldrContract) console.log('Lazy Delegate Registry:', ContractId.fromSolidityAddress(ldrContract).toString());
 
 		console.log('\n───────────────────────────────────────────────────────────');
 		console.log('  Jackpot & Statistics');

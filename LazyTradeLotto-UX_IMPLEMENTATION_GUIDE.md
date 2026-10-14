@@ -5,6 +5,8 @@
 **Contract:** LazyTradeLotto.sol
 **Target Audience:** Frontend Developers, UX Designers, Integration Engineers
 
+> **v2 (2026-10):** `rollLotto` now takes `burnExempt` and `deadline` before `teamSignature`, and the signed message also binds the contract address, chain id, `burnExempt` and deadline. The burn exemption is decided by the signer, so `getBurnForUser` and the `LSH_*` / `lazyDelegateRegistry` getters no longer exist. Wins are also limited by a per-roll `maxWinAmtCap` and a 24h `payoutWindowCap`. The signature format, `rollLotto` signature and method list below are current; longer code examples further down still show v1 calls. See [LazyTradeLotto-V2_SIGNER_GUIDE.md](./LazyTradeLotto-V2_SIGNER_GUIDE.md) for the exact signer/client changes.
+
 ---
 
 ## Overview
@@ -96,15 +98,19 @@ LazyTradeLotto uses a signature-based security model to prevent gaming. The plat
 ```javascript
 // Parameters included in signature
 const messageHash = keccak256(abi.encodePacked(
+    address(this),       // v2: the LazyTradeLotto contract (blocks cross-deployment replay)
+    block.chainid,       // v2: 295 mainnet / 296 testnet (blocks cross-network replay)
     msg.sender,          // User address (prevents signature stealing)
     token,               // NFT contract address
     serial,              // NFT serial number
     nonce,               // Unique trade identifier
     buyer,               // true = buyer, false = seller
     winRateThreshold,    // Win probability (0-100,000,000)
-    minWinAmt,           // Minimum prize
-    maxWinAmt,           // Maximum prize
-    jackpotThreshold     // Jackpot probability (0-100,000,000)
+    minWinAmt,           // Minimum prize (<= maxWinAmtCap)
+    maxWinAmt,           // Maximum prize (<= maxWinAmtCap)
+    jackpotThreshold,    // Jackpot probability (0-100,000,000)
+    burnExempt,          // v2: 0% burn (LSH holder / valid delegate, resolved by the signer)
+    deadline             // v2: unix seconds; roll reverts SignatureExpired after it
 ));
 ```
 
@@ -299,8 +305,15 @@ getLottoStats() → (
     uint256 _maxJackpotPool
 )
 
-// User-specific
-getBurnForUser(address) → uint256  // 0 = NFT holder, else burn %
+// v2: the burn exemption is signed per roll (burnExempt), so there is no per-user burn view.
+// A winner pays burnPercentage() unless their roll was signed burnExempt = true.
+
+// v2 payout limits & caller policy
+maxWinAmtCap() → uint256              // largest maxWinAmt a roll may be signed with
+payoutWindowCap() → uint256           // most $LAZY payable per 24h window
+getPayoutWindow() → (uint256 start, uint256 paid, uint256 cap, uint256 remaining)
+requireCodelessCaller() → bool        // HIP-1340 guard (off until validated)
+getRollMessageHash(...) → bytes32     // the digest the signer must sign
 
 // Roll history (replay protection)
 history(bytes32 hash) → bool  // true = already rolled
@@ -322,9 +335,7 @@ jackpotPaid() → uint256
 
 // Constants
 MAX_WIN_RATE_THRESHOLD() → uint256  // 100,000,000 (100%)
-LSH_GEN1() → address
-LSH_GEN2() → address
-LSH_GEN1_MUTANT() → address
+PAYOUT_WINDOW() → uint256           // 1 day
 ```
 
 **State-Changing Methods:**
@@ -340,6 +351,8 @@ rollLotto(
     uint256 minWinAmt,
     uint256 maxWinAmt,
     uint256 jackpotThreshold,
+    bool burnExempt,           // v2
+    uint256 deadline,          // v2
     bytes memory teamSignature
 )
 

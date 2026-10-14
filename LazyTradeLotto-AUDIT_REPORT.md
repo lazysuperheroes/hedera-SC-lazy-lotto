@@ -3,6 +3,9 @@
 **Target:** `contracts/LazyTradeLotto.sol` (Hedera, Solidity `>=0.8.12`)
 **Contract role:** Signature-gated, trade-triggered $LAZY lotto. Rolls are free to the user and authorized by a `systemWallet` ECDSA signature; all wins and jackpots are paid out of the shared **LazyGasStation (LGS)** $LAZY treasury.
 **Date:** 2026-07-04
+> **Addressed in v2 (code ready, not yet deployed; v1 `0.0.9109659` was never rolled, stays paused, and was removed from LazyGasStation on 2026-10-14):** TL-01 grinding (on-chain `tx.origin == msg.sender` backstop to the signer's EOA-only rule, plus an owner switch adding `code.length == 0` for HIP-1340 delegated EOAs) · TL-02 (signed message binds `address(this)` + `block.chainid`; signatures also carry a `deadline`) · TL-03 (owner-settable per-roll `maxWinAmtCap` and 24h `payoutWindowCap`) · TL-04 + TL-05 (burn exemption is resolved off-chain with a delegation-validity check and signed as `burnExempt`; the contract no longer reads LSH collections or LazyDelegateRegistry) · TL-06 (`boostJackpot` clamps and emits the new total).
+> **Still open (accepted):** TL-01 non-finality sub-case (a payout that reverts, including on the 24h cap, re-arms the ticket); handled operationally by keeping LGS funded and sizing the cap to trip only under abuse. Signer/frontend changes: [LazyTradeLotto-V2_SIGNER_GUIDE.md](./LazyTradeLotto-V2_SIGNER_GUIDE.md). The original findings are preserved unedited below.
+
 **Method:** Multi-agent adversarial review — per-vulnerability-class finders, then three independent verifier lenses (reachability, mitigation, impact) per finding. Only findings where at least one lens confirmed reality after adversarial refutation are reported here. Every code location below was re-read and confirmed against source during synthesis.
 
 ---

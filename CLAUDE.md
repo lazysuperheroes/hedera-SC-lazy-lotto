@@ -522,7 +522,7 @@ npm test -- test/multiKeyType.test.js
 1. **Allowances**: $LAZY allowances go to **LazyGasStation** (it handles burn logic). All other fungible token and NFT allowances go to **LazyLottoStorage** (NOT LazyLotto). HBAR requires no allowance (sent as msg.value).
 2. **Token Association**: Always associate tokens before attempting transfers on Hedera
 3. **Contract Size**: When modifying LazyLotto, watch contract size (23.782KB / 24KB). May need to extract more logic to libraries.
-4. **Signature Validation**: LazyTradeLotto rolls require valid systemWallet signature with correct nonce + trade parameters
+4. **Signature Validation**: LazyTradeLotto rolls require a valid systemWallet signature over the trade parameters. v2 also binds the contract address, chain id, a signed `burnExempt` flag and a `deadline` (both passed to `rollLotto` before the signature); see `LazyTradeLotto-V2_SIGNER_GUIDE.md` and `getRollMessageHash()`
 5. **Pagination**: When querying large datasets, always use offset/limit parameters to avoid gas issues
 6. **HTS Response Codes**: Check return values from HTS operations (don't assume success). Use HederaResponseCodes mapping.
 7. **PRNG Seed Processing**: Raw PRNG seed must be hashed with nonces for different random values (see LazyLotto's `_processPRNG()`)
