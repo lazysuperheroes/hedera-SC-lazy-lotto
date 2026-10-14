@@ -1,6 +1,6 @@
 # LazyTradeLotto v2 — Ship Checklist
 
-Everything needed to take LazyTradeLotto v2 from branch `feat/lazytradelotto-v2` to live on mainnet, across the three repos. Signer/client details are in [LazyTradeLotto-V2_SIGNER_GUIDE.md](./LazyTradeLotto-V2_SIGNER_GUIDE.md).
+Everything needed to take LazyTradeLotto v2 from branch `feat/lazytradelotto-v2` to live on mainnet, across the three repos. Signer/client details are in [LazyTradeLotto-V2_SIGNER_GUIDE.md](./LazyTradeLotto-V2_SIGNER_GUIDE.md). For how this fits the wider hardening work (Mission template, minters, LazyLotto V3), see `LAZY_HARDENING_ROADMAP.md` (branch `chore/abi-refresh-and-hardening-roadmap` until merged).
 
 ## Done
 
@@ -19,8 +19,7 @@ Everything needed to take LazyTradeLotto v2 from branch `feat/lazytradelotto-v2`
 - [ ] Testnet: deploy v2 → `LazyGasStation/addContractUser.js` → `testing/rollLottoTest.js` and `testing/simulateTrade.js` end to end (`--burnExempt true|false`).
 - [ ] Mainnet: deploy v2 (starts paused) → `addContractUser.js 0.0.<v2>` on LGS `0.0.7221483` → `deployments/verifySigningKey.js` → `queries/getLottoInfo.js` (caps, payout window, jackpot, connections).
 - [ ] Unpause only after lazy-trade (section 2) is live.
-- [ ] Separately on `main`: regenerate stale ABIs (`node scripts/deployments/extractABI.js`). `abi/LazyLotto.json` still lists the removed `setPrng`, and `abi/LazyLottoPoolManager.json` the removed `CannotTransferGlobalPools`.
-- [ ] Separately: commit `scripts/interactions/Utilities/checkBatchRerolls.js`.
+- [x] Stale `LazyLotto` / `LazyLottoPoolManager` ABIs regenerated and `checkBatchRerolls.js` committed, on branch `chore/abi-refresh-and-hardening-roadmap` (merge it to `main`).
 
 ## 2. lazy-trade
 
