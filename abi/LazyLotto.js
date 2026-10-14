@@ -1699,19 +1699,6 @@ module.exports = [
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "_prng",
-        "type": "address"
-      }
-    ],
-    "name": "setPrng",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "storageContract",
     "outputs": [

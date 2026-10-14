@@ -35,11 +35,6 @@ module.exports = [
   },
   {
     "inputs": [],
-    "name": "CannotTransferGlobalPools",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "CannotWithdrawFromGlobalPools",
     "type": "error"
   },
