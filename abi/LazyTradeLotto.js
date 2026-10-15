@@ -289,8 +289,17 @@ module.exports = [
     "type": "event"
   },
   {
-    "stateMutability": "payable",
-    "type": "fallback"
+    "inputs": [],
+    "name": "MAX_SIGNATURE_TTL",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
   },
   {
     "inputs": [],

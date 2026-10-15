@@ -35,7 +35,7 @@
  *   --roller       Address that will submit the roll (default: .env ACCOUNT_ID)
  *   --burnExempt   true = roller pays 0% burn (LSH holder / valid delegate; see queries/getUserBurn.js) [default: false]
  *   --contract     LazyTradeLotto the signature is for (default: .env LAZY_TRADE_LOTTO_CONTRACT_ID)
- *   --ttl          Seconds until the signature expires (deadline = now + ttl)  [default: 600]
+ *   --ttl          Seconds until the signature expires (deadline = now + ttl, max 3600)  [default: 600]
  *   --rawAmounts   Treat --minWin/--maxWin as raw base units (skip decimal conversion)
  *
  * Env: SIGNING_KEY (ECDSA), ACCOUNT_ID (default roller), LAZY_TRADE_LOTTO_CONTRACT_ID,
@@ -46,7 +46,11 @@ require('dotenv').config();
 const { AccountId, TokenId } = require('@hashgraph/sdk');
 const { ethers } = require('ethers');
 
+const { resolveRoller } = require('../queries/getUserBurn');
+
 const MAX_WIN_RATE_THRESHOLD = 100_000_000n;
+// LazyTradeLotto.MAX_SIGNATURE_TTL: deadlines further out than this are rejected on-chain
+const MAX_SIGNATURE_TTL = 3600;
 
 // block.chainid per Hedera network, keyed by the ENVIRONMENT values the scripts accept
 const CHAIN_IDS = {
@@ -224,8 +228,13 @@ async function buildRollSignature({
 	};
 }
 
-/** Resolve CLI flags + env into fully-typed roll parameters. */
-function resolveRollParams(flags) {
+/**
+ * Resolve CLI flags + env into fully-typed roll parameters.
+ * A 0.0.x roller is looked up on the mirror node and signed for as Hedera's msg.sender: the EVM
+ * alias for ECDSA accounts that have one, else the long-zero address. Signing for the long-zero
+ * form of an alias account makes the roll revert InvalidTeamSignature.
+ */
+async function resolveRollParams(flags) {
 	const signingKey = process.env.SIGNING_KEY;
 	if (!signingKey) throw new Error('SIGNING_KEY missing from .env (must be an ECDSA key)');
 
@@ -239,12 +248,23 @@ function resolveRollParams(flags) {
 	const chainId = chainIdFor(process.env.ENVIRONMENT);
 
 	const ttl = Number(flags.ttl ?? 600);
-	if (!Number.isInteger(ttl) || ttl <= 0) throw new Error('--ttl must be a positive number of seconds');
+	if (!Number.isInteger(ttl) || ttl <= 0 || ttl > MAX_SIGNATURE_TTL) {
+		throw new Error(`--ttl must be 1-${MAX_SIGNATURE_TTL} seconds (the contract's MAX_SIGNATURE_TTL)`);
+	}
 	const deadline = BigInt(Math.floor(Date.now() / 1000) + ttl);
 
 	const rollerSrc = flags.roller || process.env.ACCOUNT_ID;
 	if (!rollerSrc) throw new Error('No roller: pass --roller or set ACCOUNT_ID in .env');
-	const roller = toEvmAddress(rollerSrc, 'roller');
+	let roller;
+	let rollerLongZero = null;
+	if (rollerSrc.startsWith('0.0.')) {
+		const resolved = await resolveRoller(process.env.ENVIRONMENT, rollerSrc);
+		roller = ethers.getAddress(resolved.rollerAddress);
+		rollerLongZero = ethers.getAddress(resolved.longZero);
+	}
+	else {
+		roller = toEvmAddress(rollerSrc, 'roller');
+	}
 
 	if (!flags.token) throw new Error('--token is required');
 	const token = toEvmAddress(flags.token, 'token');
@@ -270,7 +290,7 @@ function resolveRollParams(flags) {
 	if (maxWinAmt === 0n) throw new Error('--maxWin must be > 0');
 	if (minWinAmt > maxWinAmt) throw new Error('--minWin cannot exceed --maxWin');
 
-	return { signingKey, lazyDecimals, contract, chainId, roller, token, serial, nonce, buyer, winRateThreshold, minWinAmt, maxWinAmt, jackpotThreshold, burnExempt, deadline };
+	return { signingKey, lazyDecimals, contract, chainId, roller, rollerLongZero, token, serial, nonce, buyer, winRateThreshold, minWinAmt, maxWinAmt, jackpotThreshold, burnExempt, deadline };
 }
 
 async function main() {
@@ -281,7 +301,7 @@ async function main() {
 		return;
 	}
 
-	const p = resolveRollParams(flags);
+	const p = await resolveRollParams(flags);
 	const result = await buildRollSignature(p);
 
 	console.log('\n═══════════════════════════════════════════════════════════');
@@ -289,6 +309,9 @@ async function main() {
 	console.log('═══════════════════════════════════════════════════════════\n');
 	console.log('Contract:           ', p.contract, `(chain id ${p.chainId})`);
 	console.log('Roller (msg.sender):', p.roller);
+	if (p.rollerLongZero && p.rollerLongZero !== p.roller) {
+		console.log('  (EVM alias; its long-zero form', p.rollerLongZero, 'would NOT match msg.sender)');
+	}
 	console.log('Token:              ', p.token);
 	console.log('Serial:             ', p.serial.toString());
 	console.log('Nonce:              ', p.nonce.toString());
@@ -320,7 +343,7 @@ function fs_help() {
 		'  --jackpotRate <n>      Jackpot threshold /100,000,000  [default: 5000000]',
 		'  --roller <0.0.x|0x..>  Roller address (default: .env ACCOUNT_ID)',
 		'  --contract <0.0.x|0x..> LazyTradeLotto to sign for (default: .env LAZY_TRADE_LOTTO_CONTRACT_ID)',
-		'  --ttl <seconds>        Signature lifetime                [default: 600]',
+		'  --ttl <seconds>        Signature lifetime, max 3600      [default: 600]',
 		'  --burnExempt <bool>    Roller pays 0% burn (LSH holder / valid delegate) [default: false]',
 		'  --rawAmounts           Treat min/max as raw base units (no decimal scaling)',
 		'',

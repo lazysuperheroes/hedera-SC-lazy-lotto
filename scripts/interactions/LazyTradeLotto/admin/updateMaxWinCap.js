@@ -111,6 +111,22 @@ const main = async () => {
 	// Calculate the cap with decimals
 	const capWithDecimals = Math.floor(newCap * (10 ** lazyTokenDecimals));
 
+	// The contract requires payoutWindowCap >= maxJackpotPool + maxWinAmtCap (otherwise a full
+	// jackpot could never be paid); check here for a clear message instead of a revert.
+	const [poolMaxRes, winCapRes, windowCapRes] = await Promise.all([
+		queryContract(env, contractId, ltlIface, 'maxJackpotPool', [], operatorId),
+		queryContract(env, contractId, ltlIface, 'maxWinAmtCap', [], operatorId),
+		queryContract(env, contractId, ltlIface, 'payoutWindowCap', [], operatorId),
+	]);
+	const caps = { maxJackpotPool: BigInt(poolMaxRes[0]), maxWinAmtCap: BigInt(winCapRes[0]), payoutWindowCap: BigInt(windowCapRes[0]) };
+	caps.maxWinAmtCap = BigInt(capWithDecimals);
+	if (caps.payoutWindowCap < caps.maxJackpotPool + caps.maxWinAmtCap) {
+		const fmt = (v) => Number(v) / (10 ** lazyTokenDecimals);
+		console.log(`ERROR: payoutWindowCap (${fmt(caps.payoutWindowCap)}) must be at least maxJackpotPool (${fmt(caps.maxJackpotPool)}) + maxWinAmtCap (${fmt(caps.maxWinAmtCap)}) $LAZY.`);
+		console.log('Raise payoutWindowCap first (updatePayoutWindowCap.js).');
+		return;
+	}
+
 	const proceed = readlineSync.keyInYNStrict('Do you want to update the max win cap?');
 	if (!proceed) {
 		console.log('Operation canceled by user.');

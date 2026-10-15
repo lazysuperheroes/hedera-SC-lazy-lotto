@@ -75,13 +75,19 @@ async function main() {
 	// Fetch all contract data
 	console.log('Fetching contract data...\n');
 
-	// getters that only exist on one contract version resolve to null on the other
+	// getters that only exist on one contract version resolve to null on the other. Only a revert
+	// (missing selector) or an empty/undecodable result means "not on this version"; network and
+	// mirror errors are rethrown rather than silently hiding a section.
 	const tryQuery = async (fn, iface = ltlIface) => {
 		try {
 			return await queryContract(env, contractId, iface, fn, [], operatorId);
 		}
-		catch {
-			return null;
+		catch (err) {
+			const body = JSON.stringify(err.response?.data ?? '');
+			const reverted = err.response?.status === 400 && /CONTRACT_REVERT_EXECUTED/.test(body);
+			const undecodable = err.code === 'BAD_DATA';
+			if (reverted || undecodable) return null;
+			throw err;
 		}
 	};
 	// pre-v2 only: on-chain LSH exemption lookups (v2 signs the exemption per roll)

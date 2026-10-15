@@ -19,6 +19,7 @@
  */
 
 require('dotenv').config();
+const axios = require('axios');
 const {
 	AccountId,
 	ContractId,
@@ -26,78 +27,146 @@ const {
 } = require('@hashgraph/sdk');
 const { loadInterface } = require('../../../../utils/abiLoader');
 const { queryContract } = require('../../../../utils/queryHelpers');
-const { getArgFlag } = require('../../../../utils/nodeHelpers');
-const {
-	checkMirrorBalance,
-	homebrewPopulateAccountEvmAddress,
-	homebrewPopulateAccountNum,
-} = require('../../../../utils/hederaMirrorHelpers');
+const { getArgFlag, sleep } = require('../../../../utils/nodeHelpers');
+const { getBaseURL } = require('../../../../utils/hederaMirrorHelpers');
 
 const contractName = 'LazyTradeLotto';
 const LSH_ENV = ['LSH_GEN1_TOKEN_ID', 'LSH_GEN2_TOKEN_ID', 'LSH_GEN1_MUTANT_TOKEN_ID'];
 
+// checkNFTDelegationIsValidBatch makes one ownerOf (one HTS child record) per serial, and a
+// transaction may produce at most 50 following child records; stay well under that.
+const VALIDITY_CHUNK = 40;
+// getSerialsDelegatedTo has no HTS calls but costs ~2-3k gas per serial
+const LIST_GAS = 3_000_000;
+
+/**
+ * GET a mirror-node path, retrying transient failures. Throws instead of guessing: the signer must
+ * never sign a roller address or burn flag derived from a failed lookup.
+ * @param {string} env ENVIRONMENT value
+ * @param {string} path e.g. /api/v1/accounts/0.0.123
+ * @param {object} [o]
+ * @param {boolean} [o.allow404=false] return null on 404 instead of throwing
+ */
+async function mirrorGetStrict(env, path, { allow404 = false } = {}) {
+	const url = `${getBaseURL(env)}${path}`;
+	let lastErr;
+	for (let attempt = 0; attempt < 4; attempt++) {
+		try {
+			return (await axios.get(url, { timeout: 10_000 })).data;
+		}
+		catch (err) {
+			const status = err.response?.status;
+			if (status === 404 && allow404) return null;
+			// 4xx other than rate limiting won't improve with a retry
+			if (status && status < 500 && status !== 429) throw new Error(`Mirror ${status} for ${path}`);
+			lastErr = err;
+			await sleep(500 * 2 ** attempt);
+		}
+	}
+	throw new Error(`Mirror lookup failed for ${path}: ${lastErr?.message}`);
+}
+
+/**
+ * Resolve the address Hedera uses as msg.sender for an account: its EVM alias (ECDSA accounts
+ * with an alias) or else its long-zero address. Signing for any other form makes the roll revert
+ * InvalidTeamSignature.
+ * @param {string} env ENVIRONMENT value
+ * @param {string} user account id (0.0.x) or EVM address
+ * @returns {Promise<{accountId: string, rollerAddress: string, longZero: string, delegationAddress: string|null}>}
+ */
+async function resolveRoller(env, user) {
+	const account = await mirrorGetStrict(env, `/api/v1/accounts/${user}`);
+	const accountId = account.account;
+	const longZero = `0x${AccountId.fromString(accountId).toSolidityAddress()}`.toLowerCase();
+	const evm = typeof account.evm_address === 'string' ? account.evm_address.toLowerCase() : '';
+	const rollerAddress = /^0x[0-9a-f]{40}$/.test(evm) ? evm : longZero;
+	return { accountId, rollerAddress, longZero, delegationAddress: codeDelegationOf(account) };
+}
+
+/**
+ * HIP-1340 code delegation of a mirror account record, or null. The mirror omits the field (or
+ * returns null / "0x") for undelegated accounts, so only a real non-zero address counts.
+ * @param {object} account mirror /api/v1/accounts/{id} response
+ */
+function codeDelegationOf(account) {
+	const d = account?.delegation_address;
+	if (typeof d !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(d) || /^0x0{40}$/.test(d)) return null;
+	return d.toLowerCase();
+}
+
 /**
  * Decide the burnExempt flag the signer should sign for `user`.
+ *
+ * Fails closed: any mirror or contract-call failure throws. The caller then either refuses to
+ * sign (ask the user to retry) or signs burnExempt=false; it must never sign true on a guess.
  * @param {object} o
  * @param {string} o.env ENVIRONMENT value
  * @param {string} o.user account id (0.0.x) or EVM address
  * @param {AccountId} o.operatorId account used as `from` for mirror-node view calls
  * @param {string[]} o.lshTokenIds LSH collection token ids (0.0.x)
  * @param {string} o.ldrId LazyDelegateRegistry contract id (0.0.x)
- * @returns {Promise<{burnExempt: boolean, accountId: string, rollerAddresses: string[], direct: object[], delegated: object[]}>}
+ * @returns {Promise<{burnExempt: boolean, accountId: string, rollerAddress: string, rollerAddresses: string[], direct: object[], delegated: object[]}>}
  */
 async function resolveBurnExempt({ env, user, operatorId, lshTokenIds, ldrId }) {
-	// account id for balances; EVM address(es) for the registry (delegations are keyed by address)
-	let accountId;
-	if (user.startsWith('0.0.')) {
-		accountId = user;
-	}
-	else {
-		accountId = (await homebrewPopulateAccountNum(env, user))?.toString() ?? user;
-	}
-	const longZero = `0x${AccountId.fromString(accountId).toSolidityAddress()}`.toLowerCase();
-	const alias = String(await homebrewPopulateAccountEvmAddress(env, accountId)).toLowerCase();
-	const rollerAddresses = [...new Set([alias.startsWith('0x') ? alias : `0x${alias}`, longZero])];
+	const { accountId, rollerAddress, longZero } = await resolveRoller(env, user);
+	// delegations are keyed by address, and a delegator may have used either form
+	const rollerAddresses = [...new Set([rollerAddress, longZero])];
 
 	// 1. direct holdings
 	const direct = [];
 	for (const tokenId of lshTokenIds) {
-		const balance = await checkMirrorBalance(env, accountId, tokenId);
-		direct.push({ tokenId, balance: Number(balance ?? 0) });
+		const res = await mirrorGetStrict(env, `/api/v1/accounts/${accountId}/tokens?token.id=${tokenId}`);
+		const row = (res.tokens ?? []).find((t) => t.token_id === tokenId);
+		direct.push({ tokenId, balance: Number(row?.balance ?? 0) });
 	}
 	if (direct.some((d) => d.balance > 0)) {
-		return { burnExempt: true, accountId, rollerAddresses, direct, delegated: [] };
+		return { burnExempt: true, accountId, rollerAddress, rollerAddresses, direct, delegated: [] };
 	}
 
-	// 2. delegations that are still valid (the delegator still owns the serial)
+	// 2. delegations that are still valid (the delegator still owns the serial). One valid serial
+	//    is enough, so stop at the first.
 	const ldrIface = loadInterface('LazyDelegateRegistry');
 	const ldr = ContractId.fromString(ldrId);
 	const delegated = [];
 	for (const addr of rollerAddresses) {
-		const tokens = [];
-		const serials = [];
 		for (const tokenId of lshTokenIds) {
 			const tokenAddr = `0x${TokenId.fromString(tokenId).toSolidityAddress()}`;
-			const res = await queryContract(env, ldr, ldrIface, 'getSerialsDelegatedTo', [addr, tokenAddr], operatorId);
-			const list = [...res[0]];
-			if (list.length > 0) {
-				tokens.push(tokenAddr);
-				serials.push(list);
+			// the full list in one call: getSerialsDelegatedToRange panics for any offset > 0
+			// (LazyDelegateRegistry writes serials[j] instead of serials[j - offset])
+			const res = await queryContract(env, ldr, ldrIface, 'getSerialsDelegatedTo', [addr, tokenAddr], operatorId, { gas: LIST_GAS });
+			const list = [...res[0]].map(Number);
+			for (let i = 0; i < list.length; i += VALIDITY_CHUNK) {
+				const chunk = await checkValidChunk({ env, ldr, ldrIface, operatorId, tokenId, tokenAddr, serials: list.slice(i, i + VALIDITY_CHUNK) });
+				delegated.push({ delegate: addr, tokenId, ...chunk });
+				if (chunk.valid.some(Boolean)) {
+					return { burnExempt: true, accountId, rollerAddress, rollerAddresses, direct, delegated };
+				}
 			}
 		}
-		if (tokens.length === 0) continue;
-		const validRes = await queryContract(env, ldr, ldrIface, 'checkNFTDelegationIsValidBatch', [tokens, serials], operatorId);
-		tokens.forEach((tokenAddr, i) => {
-			delegated.push({
-				delegate: addr,
-				tokenId: TokenId.fromSolidityAddress(tokenAddr).toString(),
-				serials: serials[i].map(Number),
-				valid: [...validRes[0][i]],
-			});
-		});
 	}
-	const burnExempt = delegated.some((d) => d.valid.some(Boolean));
-	return { burnExempt, accountId, rollerAddresses, direct, delegated };
+	return { burnExempt: false, accountId, rollerAddress, rollerAddresses, direct, delegated };
+}
+
+/**
+ * checkNFTDelegationIsValidBatch for one chunk. ownerOf reverts for a burned serial, which reverts
+ * the whole call (and the registry can't revoke that delegation), so on failure drop serials the
+ * mirror reports as deleted and retry once.
+ */
+async function checkValidChunk({ env, ldr, ldrIface, operatorId, tokenId, tokenAddr, serials }) {
+	const call = (list) => queryContract(env, ldr, ldrIface, 'checkNFTDelegationIsValidBatch', [[tokenAddr], [list]], operatorId);
+	try {
+		return { serials, valid: [...(await call(serials))[0][0]] };
+	}
+	catch (err) {
+		const live = [];
+		for (const serial of serials) {
+			const nft = await mirrorGetStrict(env, `/api/v1/tokens/${tokenId}/nfts/${serial}`, { allow404: true });
+			if (nft && !nft.deleted) live.push(serial);
+		}
+		if (live.length === serials.length) throw err;
+		if (live.length === 0) return { serials: [], valid: [] };
+		return { serials: live, valid: [...(await call(live))[0][0]] };
+	}
 }
 
 async function main() {
@@ -143,7 +212,7 @@ async function main() {
 	console.log('\n═══════════════════════════════════════════════════════════');
 	console.log('           Burn Exemption (signed burnExempt)');
 	console.log('═══════════════════════════════════════════════════════════\n');
-	console.log('Account:', r.accountId, `(${r.rollerAddresses.join(' / ')})`);
+	console.log('Account:', r.accountId, `(msg.sender ${r.rollerAddress}; delegations checked for ${r.rollerAddresses.join(' / ')})`);
 	console.log('\nDirect LSH holdings:');
 	r.direct.forEach((d) => console.log(`  ${d.tokenId}: ${d.balance}`));
 	if (r.delegated.length > 0) {
@@ -154,7 +223,7 @@ async function main() {
 	console.log('Burn applied on a win:', r.burnExempt ? '0%' : `${contractBurn}%`);
 }
 
-module.exports = { resolveBurnExempt };
+module.exports = { resolveBurnExempt, resolveRoller, codeDelegationOf, mirrorGetStrict };
 
 if (require.main === module) {
 	main()

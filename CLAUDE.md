@@ -193,7 +193,7 @@ LSH_GEN2_TOKEN_ID=0.0.xxxxx
 LSH_GEN1_MUTANT_TOKEN_ID=0.0.xxxxx
 
 # System configuration
-PRNG_CONTRACT_ID=0.0.8257116    # Hedera PRNG precompile
+PRNG_CONTRACT_ID=0.0.10583667   # mainnet PRNG wrapper (inclusive [lo, hi]); NOT the older 0.0.8257116, which never returns hi
 SIGNING_KEY=...                  # ECDSA key for LazyTradeLotto signature validation
 
 # Deployment parameters

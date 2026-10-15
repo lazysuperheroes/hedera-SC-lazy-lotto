@@ -302,6 +302,18 @@ const main = async () => {
 	const maxWinAmtCapWithDecimals = maxWinAmtCap * (10 ** LAZY_DECIMAL);
 	const payoutWindowCapWithDecimals = payoutWindowCap * (10 ** LAZY_DECIMAL);
 
+	// The constructor reverts unless the window fits a full jackpot (maxJackpotPool defaults to
+	// 500,000 base units) plus a maximum regular win; check first for a clear message.
+	const DEFAULT_MAX_JACKPOT_POOL = 500_000;
+	if (payoutWindowCapWithDecimals < DEFAULT_MAX_JACKPOT_POOL + maxWinAmtCapWithDecimals) {
+		console.log(`ERROR: LOTTO_PAYOUT_WINDOW_CAP must be at least ${(DEFAULT_MAX_JACKPOT_POOL + maxWinAmtCapWithDecimals) / (10 ** LAZY_DECIMAL)} $LAZY`,
+			`(default max jackpot ${DEFAULT_MAX_JACKPOT_POOL / (10 ** LAZY_DECIMAL)} + max win cap ${maxWinAmtCap}).`);
+		return;
+	}
+	if (initialJackpotWithDecimals > DEFAULT_MAX_JACKPOT_POOL) {
+		console.log(`NOTE: INITIAL_LOTTO_JACKPOT is above the default max jackpot (${DEFAULT_MAX_JACKPOT_POOL / (10 ** LAZY_DECIMAL)} $LAZY); the contract clamps it down.`);
+	}
+
 	// Step 6: Final confirmation before deploying LazyTradeLotto
 	console.log('\n----- LazyTradeLotto Configuration Summary -----');
 	console.log('Initial Jackpot: ', initialLottoJackpot, '$LAZY', '(raw:', initialJackpotWithDecimals, ')');

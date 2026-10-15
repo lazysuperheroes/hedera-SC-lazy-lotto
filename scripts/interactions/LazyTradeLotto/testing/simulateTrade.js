@@ -42,7 +42,7 @@ async function rollSide(ctx, side) {
 	const { env, client, contractId, ltlIface, operatorId, flags, decimals } = ctx;
 
 	// override the buyer flag for this side; all other trade params stay identical
-	const p = resolveRollParams({ ...flags, contract: flags.contract || contractId.toString(), buyer: String(side.buyer) });
+	const p = await resolveRollParams({ ...flags, contract: flags.contract || contractId.toString(), buyer: String(side.buyer) });
 	const { signature } = await buildRollSignature(p);
 
 	// already-rolled check for THIS side (does not abort the other side)
@@ -97,7 +97,7 @@ async function main() {
 	const ltlIface = loadInterface(contractName);
 
 	// Resolve trade params once (buyer side) for display + the shared pre-flight
-	const p = resolveRollParams({ ...flags, contract: flags.contract || contractId.toString(), buyer: 'true' });
+	const p = await resolveRollParams({ ...flags, contract: flags.contract || contractId.toString(), buyer: 'true' });
 	const decimals = p.lazyDecimals;
 	const { signerAddress } = await buildRollSignature(p);
 

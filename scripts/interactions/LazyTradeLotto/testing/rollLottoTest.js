@@ -34,7 +34,7 @@ const { loadInterface } = require('../../../../utils/abiLoader');
 const { queryContract } = require('../../../../utils/queryHelpers');
 const { contractExecuteFunction } = require('../../../../utils/solidityHelpers');
 const { buildRollSignature, resolveRollParams, parseArgs, parseRollOutcome, isTokenAssociated } = require('./generateSignature');
-const { resolveBurnExempt } = require('../queries/getUserBurn');
+const { resolveBurnExempt, resolveRoller } = require('../queries/getUserBurn');
 
 const contractName = 'LazyTradeLotto';
 const GAS = 1_500_000;
@@ -63,7 +63,7 @@ async function main() {
 
 	const ltlIface = loadInterface(contractName);
 	// sign for the contract we are about to roll on (v2 signatures are bound to it)
-	const p = resolveRollParams({ ...flags, contract: flags.contract || contractId.toString() });
+	const p = await resolveRollParams({ ...flags, contract: flags.contract || contractId.toString() });
 	const decimals = p.lazyDecimals;
 
 	const { signature, signerAddress, messageHash } = await buildRollSignature(p);
@@ -96,6 +96,16 @@ async function main() {
 	console.log('  systemWallet:', systemWallet, signerOk ? 'OK (matches SIGNING_KEY)' : 'MISMATCH!');
 	if (!signerOk) {
 		console.log('    -> SIGNING_KEY does not match the contract systemWallet; roll WILL revert (InvalidTeamSignature).');
+		blocking = true;
+	}
+
+	// 1a. the roller we signed for must be the address Hedera will use as msg.sender for the
+	//     operator (its EVM alias if it has one, else long-zero)
+	const operatorRoller = await resolveRoller(env, operatorId.toString());
+	const rollerOk = operatorRoller.rollerAddress.toLowerCase() === p.roller.toLowerCase();
+	console.log('  roller:', p.roller, rollerOk ? 'OK (operator msg.sender)' : `MISMATCH! operator rolls as ${operatorRoller.rollerAddress}`);
+	if (!rollerOk) {
+		console.log('    -> signature is for a different address than msg.sender; roll WILL revert (InvalidTeamSignature).');
 		blocking = true;
 	}
 
@@ -155,11 +165,16 @@ async function main() {
 		console.log(`  burn exemption: signing ${p.burnExempt} (set LSH_*_TOKEN_ID + LAZY_DELEGATE_REGISTRY_CONTRACT_ID to cross-check)`);
 	}
 
-	// 4b. payout window: a win larger than what is left in the 24h window reverts PayoutCapReached
+	// 4b. payout window: a win larger than what is left in the 24h window reverts PayoutCapReached.
+	//     A jackpot hit pays the whole pool, so count it when the jackpot can be hit.
 	const [, windowPaid, windowCap, windowRemaining] = await queryContract(env, contractId, ltlIface, 'getPayoutWindow', [], operatorId);
-	const windowOk = BigInt(windowRemaining) >= p.maxWinAmt;
+	const jackpotPool = p.jackpotThreshold > 0n
+		? BigInt((await queryContract(env, contractId, ltlIface, 'jackpotPool', [], operatorId))[0])
+		: 0n;
+	const worstCase = p.maxWinAmt + jackpotPool;
+	const windowOk = BigInt(windowRemaining) >= worstCase;
 	console.log(`  payout window: ${fmtLazy(windowPaid, decimals)} / ${fmtLazy(windowCap, decimals)} $LAZY paid in the last 24h`,
-		windowOk ? 'OK' : '-> a max win would exceed it; a winning roll WILL revert (PayoutCapReached).');
+		windowOk ? 'OK' : `-> a max win${jackpotPool > 0n ? ' plus the jackpot' : ''} (${fmtLazy(worstCase, decimals)}) would exceed it; such a roll WILL revert (PayoutCapReached).`);
 
 	// 5. payout recipient must have $LAZY associated (a win transfers $LAZY to msg.sender)
 	const assoc = await isTokenAssociated(env, operatorId.toString(), process.env.LAZY_TOKEN_ID);

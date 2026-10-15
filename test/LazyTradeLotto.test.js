@@ -85,7 +85,7 @@ const HEDERA_CHAIN_IDS = { MAIN: 295, TEST: 296, PREVIEW: 297, LOCAL: 298 };
 const signedRollParams = new Map();
 function rollTail(signature) {
 	const signed = signedRollParams.get(signature) ?? {};
-	return [signed.burnExempt ?? false, signed.deadline ?? Math.floor(Date.now() / 1000) + 3600, signature];
+	return [signed.burnExempt ?? false, signed.deadline ?? Math.floor(Date.now() / 1000) + 600, signature];
 }
 
 describe('Deployment', () => {
@@ -1288,34 +1288,26 @@ describe('Time to roll the lotto', () => {
 		);
 
 		// Try with invalid token address (zero address)
-		try {
-			const result = await contractExecuteFunction(
-				ltlContractId,
-				lazyTradeLottoIface,
-				client,
-				600_000,
-				'rollLotto',
-				[
-					ethers.ZeroAddress,
-					serial,
-					userNonce,
-					true,
-					winRateThreshold,
-					minWinAmt,
-					maxWinAmt,
-					jackpotThreshold,
-					...rollTail(signature),
-				],
-			);
-			if (result[0]?.status?.toString() === 'SUCCESS') {
-				console.log('ERROR: Should have failed with invalid token address', result);
-				fail();
-			}
-		}
-		catch (err) {
-			console.log('Expected error with invalid token address:', err.message);
-			expect(err.message).to.include('BadArguments');
-		}
+		const result = await contractExecuteFunction(
+			ltlContractId,
+			lazyTradeLottoIface,
+			client,
+			600_000,
+			'rollLotto',
+			[
+				ethers.ZeroAddress,
+				serial,
+				userNonce,
+				true,
+				winRateThreshold,
+				minWinAmt,
+				maxWinAmt,
+				jackpotThreshold,
+				...rollTail(signature),
+			],
+		);
+		expect(result[0]?.status?.name).to.be.equal('BadArguments');
+		expect(result[0]?.status?.args?.[0]).to.be.equal('Trade Params');
 
 		// Increment nonce for next test
 		userNonce++;
@@ -1343,34 +1335,26 @@ describe('Time to roll the lotto', () => {
 		);
 
 		// Try with invalid win amounts
-		try {
-			const result = await contractExecuteFunction(
-				ltlContractId,
-				lazyTradeLottoIface,
-				client,
-				600_000,
-				'rollLotto',
-				[
-					token,
-					serial,
-					userNonce,
-					true,
-					winRateThreshold,
-					invalidMinWin,
-					invalidMaxWin,
-					jackpotThreshold,
-					...rollTail(signature),
-				],
-			);
-			if (result[0]?.status?.toString() === 'SUCCESS') {
-				console.log('ERROR: Should have failed with invalid win amounts', result);
-				fail();
-			}
-		}
-		catch (err) {
-			console.log('Expected error with invalid win amounts:', err.message);
-			expect(err.message).to.include('BadArguments');
-		}
+		const result = await contractExecuteFunction(
+			ltlContractId,
+			lazyTradeLottoIface,
+			client,
+			600_000,
+			'rollLotto',
+			[
+				token,
+				serial,
+				userNonce,
+				true,
+				winRateThreshold,
+				invalidMinWin,
+				invalidMaxWin,
+				jackpotThreshold,
+				...rollTail(signature),
+			],
+		);
+		expect(result[0]?.status?.name).to.be.equal('BadArguments');
+		expect(result[0]?.status?.args?.[0]).to.be.equal('Win Amounts');
 
 		userNonce++;
 	});
@@ -1395,34 +1379,26 @@ describe('Time to roll the lotto', () => {
 		);
 
 		// Try with invalid win rate threshold
-		try {
-			const result = await contractExecuteFunction(
-				ltlContractId,
-				lazyTradeLottoIface,
-				client,
-				600_000,
-				'rollLotto',
-				[
-					token,
-					serial,
-					userNonce,
-					false,
-					invalidThreshold,
-					minWinAmt,
-					maxWinAmt,
-					jackpotThreshold,
-					...rollTail(signatureHex),
-				],
-			);
-			if (result[0]?.status?.toString() === 'SUCCESS') {
-				console.log('ERROR: Should have failed with invalid win rate threshold', result);
-				fail();
-			}
-		}
-		catch (err) {
-			console.log('Expected error with invalid win rate threshold:', err.message);
-			expect(err.message).to.include('BadArguments');
-		}
+		const result = await contractExecuteFunction(
+			ltlContractId,
+			lazyTradeLottoIface,
+			client,
+			600_000,
+			'rollLotto',
+			[
+				token,
+				serial,
+				userNonce,
+				false,
+				invalidThreshold,
+				minWinAmt,
+				maxWinAmt,
+				jackpotThreshold,
+				...rollTail(signatureHex),
+			],
+		);
+		expect(result[0]?.status?.name).to.be.equal('BadArguments');
+		expect(result[0]?.status?.args?.[0]).to.be.equal('Win Rate');
 
 		userNonce++;
 	});
@@ -1431,38 +1407,46 @@ describe('Time to roll the lotto', () => {
 		userNonce++;
 		client.setOperator(operatorId, operatorKey);
 
-		// Use a random invalid signature
-		const invalidSignature = ethers.hexlify(ethers.randomBytes(65));
+		// A well-formed signature over the correct digest, but from a key that isn't the system
+		// wallet. (Random bytes would revert inside OpenZeppelin ECDSA with Error(string) instead.)
+		const deadline = Math.floor(Date.now() / 1000) + 600;
+		const digest = rollMessageHash(
+			ltlContractId.toSolidityAddress(),
+			operatorId.toSolidityAddress(),
+			token,
+			serial,
+			userNonce,
+			true,
+			winRateThreshold,
+			minWinAmt,
+			maxWinAmt,
+			jackpotThreshold,
+			false,
+			deadline,
+		);
+		const invalidSignature = await ethers.Wallet.createRandom().signMessage(ethers.getBytes(digest));
+		signedRollParams.set(invalidSignature, { burnExempt: false, deadline });
 
 		// Try with invalid signature
-		try {
-			const result = await contractExecuteFunction(
-				ltlContractId,
-				lazyTradeLottoIface,
-				client,
-				600_000,
-				'rollLotto',
-				[
-					token,
-					serial,
-					userNonce,
-					true,
-					winRateThreshold,
-					minWinAmt,
-					maxWinAmt,
-					jackpotThreshold,
-					...rollTail(invalidSignature),
-				],
-			);
-			if (result[0]?.status?.toString() === 'SUCCESS') {
-				console.log('ERROR: Should have failed with invalid signature');
-				fail();
-			}
-		}
-		catch (err) {
-			console.log('Expected error with invalid signature:', err.message);
-			expect(err.message).to.include('InvalidTeamSignature');
-		}
+		const result = await contractExecuteFunction(
+			ltlContractId,
+			lazyTradeLottoIface,
+			client,
+			600_000,
+			'rollLotto',
+			[
+				token,
+				serial,
+				userNonce,
+				true,
+				winRateThreshold,
+				minWinAmt,
+				maxWinAmt,
+				jackpotThreshold,
+				...rollTail(invalidSignature),
+			],
+		);
+		expect(result[0]?.status?.name).to.be.equal('InvalidTeamSignature');
 
 		userNonce++;
 	});
@@ -1655,43 +1639,164 @@ describe('Time to roll the lotto', () => {
 		userNonce++;
 		client.setOperator(operatorId, operatorKey);
 
-		// a 1-base-unit window cap means any regular win exceeds it
-		let result = await contractExecuteFunction(ltlContractId, lazyTradeLottoIface, client, null, 'updatePayoutWindowCap', [1]);
-		expect(result[0]?.status?.toString()).to.be.equal('SUCCESS');
+		// The cap must fit maxJackpotPool + maxWinAmtCap, so a single win can never exceed it on its
+		// own; only accumulated payouts trip it. Shrink all three so one 1-$LAZY win fills the window.
+		const oneLazy = 1 * 10 ** LAZY_DECIMAL;
+		const statsResponse = await readOnlyEVMFromMirrorNode(
+			env,
+			ltlContractId,
+			lazyTradeLottoIface.encodeFunctionData('getLottoStats'),
+			operatorId,
+			false,
+		);
+		const stats = lazyTradeLottoIface.decodeFunctionResult('getLottoStats', statsResponse);
+		const poolBefore = Number(stats[0]);
+		const maxPoolBefore = Number(stats[7]);
 
-		try {
-			// 100% win rate -> guaranteed regular win -> the payout trips the window cap
-			const signature = await createSignature(
-				operatorId,
-				token,
-				serial,
-				userNonce,
-				true,
-				100_000_000,
-				minWinAmt,
-				maxWinAmt,
-				jackpotThreshold,
-			);
-			result = await contractExecuteFunction(
+		const exec = (fn, params) => contractExecuteFunction(ltlContractId, lazyTradeLottoIface, client, null, fn, params);
+		const roll = async () => {
+			userNonce++;
+			const signature = await createSignature(operatorId, token, serial, userNonce, true, 100_000_000, oneLazy, oneLazy, 0);
+			return contractExecuteFunction(
 				ltlContractId,
 				lazyTradeLottoIface,
 				client,
 				600_000,
 				'rollLotto',
-				[token, serial, userNonce, true, 100_000_000, minWinAmt, maxWinAmt, jackpotThreshold, ...rollTail(signature)],
+				[token, serial, userNonce, true, 100_000_000, oneLazy, oneLazy, 0, ...rollTail(signature)],
 			);
+		};
+
+		let result = await exec('updateMaxJackpotPool', [0]);
+		expect(result[0]?.status?.toString()).to.be.equal('SUCCESS');
+		try {
+			result = await exec('updateMaxWinAmtCap', [oneLazy]);
+			expect(result[0]?.status?.toString()).to.be.equal('SUCCESS');
+			result = await exec('updatePayoutWindowCap', [oneLazy]);
+			expect(result[0]?.status?.toString()).to.be.equal('SUCCESS');
+
+			// 100% win rate for exactly 1 $LAZY: the first win fills the window (unless earlier tests
+			// already paid out in it), so a second win must trip the cap
+			result = await roll();
+			if (result[0]?.status?.toString() === 'SUCCESS') {
+				result = await roll();
+			}
 			expect(result[0]?.status?.name).to.be.equal('PayoutCapReached');
 		}
 		finally {
-			result = await contractExecuteFunction(
+			// restore in the order the cross-check allows: window cap, then win cap, then pool max
+			result = await exec('updatePayoutWindowCap', [payoutWindowCap * 10 ** LAZY_DECIMAL]);
+			expect(result[0]?.status?.toString()).to.be.equal('SUCCESS');
+			result = await exec('updateMaxWinAmtCap', [maxWinAmtCap * 10 ** LAZY_DECIMAL]);
+			expect(result[0]?.status?.toString()).to.be.equal('SUCCESS');
+			result = await exec('updateMaxJackpotPool', [maxPoolBefore]);
+			expect(result[0]?.status?.toString()).to.be.equal('SUCCESS');
+			// updateMaxJackpotPool(0) emptied the pool; put it back for the jackpot tests
+			if (poolBefore > 0) {
+				result = await exec('boostJackpot', [poolBefore]);
+				expect(result[0]?.status?.toString()).to.be.equal('SUCCESS');
+			}
+		}
+
+		userNonce++;
+	});
+
+	it('Should enforce the payout cap, burn and deadline bounds', async () => {
+		userNonce++;
+		client.setOperator(operatorId, operatorKey);
+		const exec = (fn, params) => contractExecuteFunction(ltlContractId, lazyTradeLottoIface, client, null, fn, params);
+
+		// a window cap below maxJackpotPool + maxWinAmtCap would make a full jackpot unpayable
+		let result = await exec('updatePayoutWindowCap', [maxWinAmtCap * 10 ** LAZY_DECIMAL]);
+		expect(result[0]?.status?.name).to.be.equal('BadArguments');
+		expect(result[0]?.status?.args?.[0]).to.be.equal('Payout Window Cap');
+
+		// LazyGasStation rejects burn > 100, which would make every non-exempt win revert
+		result = await exec('updateBurnPercentage', [101]);
+		expect(result[0]?.status?.name).to.be.equal('BadArguments');
+		expect(result[0]?.status?.args?.[0]).to.be.equal('Burn Percentage');
+
+		// a deadline more than MAX_SIGNATURE_TTL (1 hour) away is refused (e.g. ms passed as seconds)
+		const farDeadline = Date.now();
+		const signature = await createSignature(
+			operatorId, token, serial, userNonce, true, winRateThreshold, minWinAmt, maxWinAmt, jackpotThreshold, false, farDeadline,
+		);
+		result = await contractExecuteFunction(
+			ltlContractId,
+			lazyTradeLottoIface,
+			client,
+			600_000,
+			'rollLotto',
+			[token, serial, userNonce, true, winRateThreshold, minWinAmt, maxWinAmt, jackpotThreshold, ...rollTail(signature)],
+		);
+		expect(result[0]?.status?.name).to.be.equal('BadArguments');
+		expect(result[0]?.status?.args?.[0]).to.be.equal('Deadline');
+
+		userNonce++;
+	});
+
+	it('Should complete zero-amount wins and empty-pool jackpot hits without paying or reverting', async () => {
+		userNonce++;
+		client.setOperator(operatorId, operatorKey);
+		const exec = (fn, params) => contractExecuteFunction(ltlContractId, lazyTradeLottoIface, client, null, fn, params);
+		const readStats = async () => {
+			await sleep(5000);
+			const response = await readOnlyEVMFromMirrorNode(
+				env,
+				ltlContractId,
+				lazyTradeLottoIface.encodeFunctionData('getLottoStats'),
+				operatorId,
+				false,
+			);
+			return lazyTradeLottoIface.decodeFunctionResult('getLottoStats', response).map(Number);
+		};
+		const roll = async (winRate, minWin, maxWin, jackpotRate) => {
+			userNonce++;
+			const signature = await createSignature(operatorId, token, serial, userNonce, true, winRate, minWin, maxWin, jackpotRate);
+			return contractExecuteFunction(
 				ltlContractId,
 				lazyTradeLottoIface,
 				client,
-				null,
-				'updatePayoutWindowCap',
-				[payoutWindowCap * 10 ** LAZY_DECIMAL],
+				600_000,
+				'rollLotto',
+				[token, serial, userNonce, true, winRate, minWin, maxWin, jackpotRate, ...rollTail(signature)],
 			);
+		};
+
+		// a guaranteed regular win drawn from [0, 1] base units: a 0 draw must not revert the roll
+		// (LazyGasStation rejects zero payouts) and must not count as a win
+		for (let i = 0; i < 3; i++) {
+			const result = await roll(100_000_000, 0, 1, 0);
 			expect(result[0]?.status?.toString()).to.be.equal('SUCCESS');
+		}
+
+		// with no loss increment, a guaranteed jackpot hit empties the pool; the next guaranteed hit
+		// finds it empty and must complete without paying or counting a jackpot
+		const statsBefore = await readStats();
+		const incrementBefore = statsBefore[6];
+		let result = await exec('updateJackpotLossIncrement', [0]);
+		expect(result[0]?.status?.toString()).to.be.equal('SUCCESS');
+		try {
+			result = await roll(0, 1, 1, 100_000_000);
+			expect(result[0]?.status?.toString()).to.be.equal('SUCCESS');
+			const afterFirst = await readStats();
+			expect(afterFirst[0]).to.be.equal(0);
+
+			result = await roll(0, 1, 1, 100_000_000);
+			expect(result[0]?.status?.toString()).to.be.equal('SUCCESS');
+			const afterSecond = await readStats();
+			// jackpotsWon and jackpotPaid unchanged by the empty-pool hit
+			expect(afterSecond[1]).to.be.equal(afterFirst[1]);
+			expect(afterSecond[2]).to.be.equal(afterFirst[2]);
+		}
+		finally {
+			result = await exec('updateJackpotLossIncrement', [incrementBefore]);
+			expect(result[0]?.status?.toString()).to.be.equal('SUCCESS');
+			// restore the starting pool so later jackpot tests see a funded pool
+			if (statsBefore[0] > 0) {
+				result = await exec('boostJackpot', [statsBefore[0]]);
+				expect(result[0]?.status?.toString()).to.be.equal('SUCCESS');
+			}
 		}
 
 		userNonce++;
@@ -2255,7 +2360,7 @@ describe('Time to roll the lotto', () => {
 
 			if (jackpotWon) {
 				// check the jackpot was reset to 1 loss increment
-				expect(jackpotAfter).to.be.equal(lottoLossIncrement);
+				expect(jackpotAfter).to.be.equal(lottoLossIncrement * 10 ** LAZY_DECIMAL);
 
 				console.log('✓ Jackpot was reset to 1 loss increment after win');
 			}
@@ -2411,7 +2516,7 @@ describe('Time to roll the lotto', () => {
 
 			if (jackpotWon) {
 				// check the jackpot was reset to 1 loss increment
-				expect(jackpotAfter).to.be.equal(lottoLossIncrement);
+				expect(jackpotAfter).to.be.equal(lottoLossIncrement * 10 ** LAZY_DECIMAL);
 
 				console.log('✓ Jackpot was reset to 1 loss increment after win');
 			}
@@ -2564,7 +2669,8 @@ async function createSignature(
 	maxWinAmt,
 	jackpotThreshold,
 	burnExempt = false,
-	deadline = Math.floor(Date.now() / 1000) + 3600,
+	// well inside the contract's MAX_SIGNATURE_TTL (1 hour), allowing for clock skew
+	deadline = Math.floor(Date.now() / 1000) + 600,
 	contractAddress = ltlContractId.toSolidityAddress(),
 ) {
 	const signer = new ethers.Wallet(`0x${signingKey.toStringRaw()}`);
