@@ -1,6 +1,8 @@
-# Lazy Superheroes — EOA-Guard Hardening Roadmap
+# Lazy Superheroes — Hardening Roadmap
 
-**Start here** to pick up the October 2026 hardening work across the Lazy contracts and apps. Written 2026-10-14. Each workstream ends with a ready-to-paste prompt for a new Claude Code session.
+**Start here** to pick up the October 2026 hardening work across the Lazy contracts and apps. Written 2026-10-14, revised 2026-10-15 after a multi-agent review. Each workstream ends with a ready-to-paste prompt for a new Claude Code session.
+
+> **2026-10-15: direction changed.** The review concluded that caller checks can't keep up with new network features that let code run around a same-transaction draw (HIP-1340 delegation and HIP-1195 hooks are the visible ones). The decision is to stop relying on caller checks altogether: **every Lazy draw moves to a two-stage commit → settle design** whose outcome comes from a future block's hash. Design: **`LAZY_TWO_STAGE_DRAW_DESIGN.md`**. Review findings and fix status: **`LAZY_REVIEW_2026-10-15.md`**. The sections below the status board are kept for history where they describe the earlier `code.length` plan.
 
 ## Why this exists
 
@@ -13,26 +15,36 @@ Several Lazy contracts draw randomness with Hedera's PRNG and settle the outcome
 
 **The fix**: also require `msg.sender.code.length == 0`. Verified on mainnet 2026-10-14: ED25519 and ECDSA EOAs report 0 bytes of code, contracts their real size, and HTS tokens 23 bytes, the same `0xef0100‖address` delegation pointer format a delegated EOA will show. So the check is harmless today. It was also proven on a local EVM: an EOA carrying a 7702 delegation pointer is rejected. HIP-1340's text does not spell out `EXTCODESIZE` explicitly, so **validate on Hedera testnet when it is enabled** before relying on it.
 
-Where we chose to keep single-transaction results ("you know what you won immediately") over commit-reveal: LazyLotto and LazyTradeLotto. Commit-reveal stays the fallback if Hedera ever adds another way to compose code after a call.
+~~Where we chose to keep single-transaction results ("you know what you won immediately") over commit-reveal: LazyLotto and LazyTradeLotto. Commit-reveal stays the fallback if Hedera ever adds another way to compose code after a call.~~ Superseded 2026-10-15: new network features keep adding ways to compose code around a call, so all draws move to two stages. With a keeper settling automatically, players still sign once and see the result in about 4–6 seconds.
+
+| Bypass (added 2026-10-15) | Status | Effect |
+|---|---|---|
+| **HIP-1195 account hooks** | Disabled on mainnet; testnet had them briefly (Feb–Apr 2026) | Same family: owner-impersonating code that can revert on a bad outcome |
+
 
 ## Status board
 
-| Contract / app | Repo · location | Live? | Guard today | Plan | When | State |
-|---|---|---|---|---|---|---|
-| **Mission template** | hedera-SC-LAZY-Farms · branch `fix/mission-eoa-code-delegation` | Factory live; **no live missions** | old template: `tx.origin` on enter only | New template: `tx.origin` + `code.length` on enter & claim, owed-reward fallback (stops the un-associate re-roll), `getOwedRewards` / `collectOwedRewards` | **Now** | Built, uncommitted, needs testnet run → [Workstream A](#a-now-mission-template-redeploy) |
-| **ForeverMinter** | hedera-SC-minter · `contracts/ForeverMinter.sol:529` | **Not live**; non-upgradeable | `tx.origin` only | Add a codeless-caller switch **before mainnet launch** | **Launch gate** | Not started → [Workstream B](#b-launch-gate-foreverminter--mintercontract) |
-| **MinterContract** | hedera-SC-minter · `contracts/MinterContract.sol:385` | **Not live**; non-upgradeable | `tx.origin` only | Same as ForeverMinter | **Launch gate** | Not started → Workstream B |
-| **LazyTradeLotto v2** | hedera-SC-lazy-lotto · branch `feat/lazytradelotto-v2` (`29bb507`) | Not deployed | `tx.origin` + owner switch `setRequireCodelessCaller` (off) | Ship after the lazy-trade signer/frontend work; at HIP-1340 just turn the switch on | When lazy-trade is ready | Committed, testnet suite not yet run → [Workstream C](#c-lazytradelotto-v2-ship) |
-| **LazyTradeLotto v1** `0.0.9109659` | — | Paused, **decommissioned** | — | Nothing: paused, removed from LazyGasStation (tx `0.0.6284762@1792011961.147310417`), holds 0 HBAR / no tokens / no allowances, never rolled | — | Done |
-| **LazyLotto v2** `0.0.10628505` | hedera-SC-lazy-lotto · `contracts/LazyLotto.sol:1490` | **Live** | `tx.origin` only | V3: add `code.length == 0` to the guard (fits: ~145 bytes spare), redeploy + migrate. Keeps instant results | **When HIP-1340 hits testnet** | Watching → [Workstream D](#d-watch-hip-1340-activation) |
-| **lazy-trade** (app) | ~/github/lazy-trade | Live | — | TradeLotto v2 signer + client; fix ticket `contractId` mismatch | With Workstream C | Not started |
-| **lazy-dapp-v3** | ~/github/lazy-dapp-v3 | Live | — | Mission owed-rewards UI; TradeLotto v2 address; launch-plan doc | With A and C | Not started |
+| Contract / app | Repo · location | Live? | Plan | State |
+|---|---|---|---|---|
+| **Two-stage draw design** + `LazyDrawBeacon` | `LAZY_TWO_STAGE_DRAW_DESIGN.md` | — | Owner decisions (keeper, expiry, caller checks, TradeLotto option) → testnet blockhash validation → build the beacon → adversarial review | **Proposal** → [Workstream F](#f-two-stage-draws) |
+| **LazyTradeLotto v2** | hedera-SC-lazy-lotto · branch `feat/lazytradelotto-v2` (PR #12) | Not deployed | Convert `rollLotto` to commit + settle before it ships; keep the review fixes | Review fixes committed (`21ca4d3`); **blocked on F** → [Workstream C](#c-lazytradelotto-v2-ship) |
+| **Mission template** | hedera-SC-LAZY-Farms · branch `fix/mission-eoa-code-delegation` (uncommitted) | Factory live; **0 clones** | Rework to two stages (claim returns staked NFTs first, then settle draws into owed); needs ~size cuts | Review found the owed fallback alone still allows a re-roll; **redeploy deferred to F** → [Workstream A](#a-now-mission-template-redeploy) |
+| **ForeverMinter / MinterContract** | hedera-SC-minter (master) | **Not live**; non-upgradeable | **Launch gate:** two-stage mint (commit takes payment, settle picks serials/metadata) instead of the codeless switch | Not started → [Workstream B](#b-launch-gate-foreverminter--mintercontract) |
+| **LazyLotto v2** `0.0.10628505` | hedera-SC-lazy-lotto · `contracts/LazyLotto.sol:1490` | **Live**, unpaused (owner decision 2026-10-15) | V3 = two-stage + new Storage/PoolManager + a sunset path; v2 wind-down needs holders to roll (see design doc) | Watching; forensics clean (567 calls, 22 plain wallets, none nested/batched) |
+| **LazyNFTStaking** `0.0.7221488` | hedera-SC-LAZY-Farms · `contracts/LazyNFTStaking.sol` | **Live**, 1,593 NFTs / 86 stakers; non-upgradeable | Custody safe; exits depend on LGS paying 33.5M accrued LAZY (LGS holds 13.5M); single-key owner. Ops fixes now; migration options A/B/C | Audit done; dApp hand-off doc written (private repo) → [Workstream G](#g-lazynftstaking-audit) |
+| **LazyTradeLotto v1** `0.0.9109659` | — | Paused, **decommissioned** | Nothing: paused, removed from LazyGasStation (tx `0.0.6284762@1792011961.147310417`), holds 0 HBAR / no tokens / no allowances, never rolled | Done |
+| **lazy-trade** (app) | ~/github/lazy-trade (branch `v2-contract` exists) | Live | TradeLotto signer + client: units bug, history-based completion, resolver port, ticket `contractId` mismatch | Not started; documented in the signer guide and checklist |
+| **lazy-dapp-v3** | ~/github/lazy-dapp-v3 | Live | "Drawing…" UX + keeper; Mission owed-rewards UI; TradeLotto v2 address | Waits on F |
 
 ## A. Now: Mission template redeploy
+
+> **2026-10-15: deferred into Workstream F.** The review showed the owed-reward fallback still leaves a deterministic re-roll (the reverting `leaveMission` runs after the draw, and the player controls whether it fails via allowance or auto-association slots), and the draw reuses one seed per iteration. The two-stage rework fixes both; the pickup prompt below is superseded for the draw parts.
 
 Everything is in **`~/github/hedera-SC-LAZY-Farms/MISSION_TEMPLATE_V2_PICKUP_PROMPT.txt`** (paste it into a session in that repo). In short: run `npm run test-farms` on testnet → commit → `scripts/deployments/configureFarms-NewMissionTemplate.js` on testnet then mainnet (MissionFactory `0.0.8257122`) → SDK/CLI `MISSION_TEMPLATE` (now `0.0.10646220`) + ABI + owed-rewards methods + release → lazy-dapp-v3 owed-rewards UI and `OnlyEOA` handling.
 
 ## B. Launch gate: ForeverMinter + MinterContract
+
+> **2026-10-15: the launch gate is now the two-stage mint** (Workstream F; per-contract notes in the design doc). The codeless switch below is no longer sufficient on its own.
 
 Both are non-upgradeable and not yet live, so **fix them before launch** and they never need a redeploy for HIP-1340. Use the LazyTradeLotto v2 pattern, an admin switch that is off by default. It assumes nothing about how Hedera implements 7702, and you turn it on once testnet confirms the behaviour:
 
@@ -65,7 +77,9 @@ hedera-SC-lazy-lotto (setRequireCodelessCaller).
 
 ## C. LazyTradeLotto v2 ship
 
-On branch `feat/lazytradelotto-v2` (commit `29bb507`). Full task list: **`LazyTradeLotto-V2_SHIP_CHECKLIST.md`**. Signer/frontend spec and test vector: **`LazyTradeLotto-V2_SIGNER_GUIDE.md`**. Both are on that branch until it's merged.
+> **2026-10-15:** the review fixes are in `21ca4d3` (cap rule, deadline bound, burn ≤ 100, no fallback, strict resolver, alias-aware scripts, test fixes). Shipping now waits for the two-stage conversion (Workstream F). The lazy-trade work in the checklist (units, history-based completion, resolver port, ticket `contractId`) can proceed independently.
+
+On branch `feat/lazytradelotto-v2` (commits `29bb507` … `21ca4d3`). Full task list: **`LazyTradeLotto-V2_SHIP_CHECKLIST.md`**. Signer/frontend spec and test vector: **`LazyTradeLotto-V2_SIGNER_GUIDE.md`**. Both are on that branch until it's merged.
 
 v2 adds:
 - a signed `deadline`;
@@ -125,6 +139,68 @@ testnet, then plan LazyLotto V3 (tx.origin + code.length guard), and the switch 
 LazyTradeLotto v2 and the minters.
 ```
 
+## F. Two-stage draws
+
+**Design:** `LAZY_TWO_STAGE_DRAW_DESIGN.md`. Order:
+1. Owner decisions listed in the design doc (keeper, expiry policy, caller checks, TradeLotto option).
+2. Testnet validation of block-hash behaviour on consensus nodes (current block returns 0, previous 256 non-zero and stable, block interval) with a tiny probe contract. Needs testnet credentials.
+3. Build `LazyDrawBeacon` + a shared commit/settle pattern; local adversarial tests (wrapper commits, wrapper settles then reverts, expiry, FIFO, draw-state lock).
+4. Convert in this order: LazyTradeLotto v2 (smallest, not deployed) → Mission template (needs size cuts) → ForeverMinter / MinterContract (launch gate) → LazyLotto V3 (largest; new Storage/PoolManager; v2 wind-down plan).
+5. Keeper (settle + anchor bot) and the "Drawing…" UX in the dApps.
+6. Adversarial multi-agent review of the beacon and each converted contract before any deploy.
+
+Prompt:
+```
+Continue Workstream F in ~/github/hedera-SC-lazy-lotto/LAZY_HARDENING_ROADMAP.md: read
+LAZY_TWO_STAGE_DRAW_DESIGN.md and LAZY_REVIEW_2026-10-15.md, confirm the open owner decisions
+with me, then build LazyDrawBeacon and convert LazyTradeLotto v2 (branch feat/lazytradelotto-v2)
+to commit/settle with local adversarial tests. Keep the roadmap status board current.
+```
+
+## G. LazyNFTStaking audit
+
+`0.0.7221488` holds users' staked NFTs and can't be upgraded. Audit 2026-10-15, in two lenses: custody/liveness/migration, and rewards/signatures. The deployed bytecode matches commit `a5c2a59`; `fd57ef7` changed comments only.
+
+- **Owner decision 2026-10-15:** LGS funding is operational. If stakers can't exit, they ask the team and the LGS gets topped up, so no contract action is needed.
+- **dApp hand-off:** `lazy-dapp-v3/docs/plans/STAKING_HARDENING_2026-10.md` (private repo). It covers signer changes and unstake pre-checks (allowance, NFTs per transaction, associations). The rewards-lens findings that concern the signer are documented there only, deliberately not in this public repo.
+
+**Custody is safe; liveness is not.**
+- **Nobody, the team included, can move, seize or force-return staked NFTs.** NFTs only move to their staker (or untracked serials to the owner). The contract's HAPI admin key is itself, so it can't be updated. Mirror holdings (1,593) match tracked serials and LDR delegations exactly.
+- **Every exit pays the staker's full accrued $LAZY first, from the shared LazyGasStation (LGS), and reverts if that fails.** This is true of both `unstake` (signed) and `unstakeAnyNFT` (no signature). On 2026-10-15:
+  - **86 stakers had 33.5M LAZY accrued** (recomputed independently from `calculateRewards`).
+  - **The LGS held 13.54M**, shared with six other contracts.
+  - Accrual runs at about 56k LAZY/day.
+  - The six largest accruers alone (13.1M) roughly empty the LGS. After that, every exit with rewards reverts until the LGS is topped up.
+
+| # | Finding | Severity | Mitigation for the live contract | Fix in a successor |
+|---|---|---|---|---|
+| F1 | Exits are tied to full reward payout from an under-funded, shared LGS | High | Keep LGS ≥ the largest single accrual at all times. Before any migration announcement, fund it to the total accrued (about +20M LAZY; SCT holds 223M) or decide openly to cut rewards. Alert when LGS < total accrued | Withdrawal never depends on payout; unpaid rewards become owed; dedicated reserve with solvency accounting |
+| F2 | Single ED25519 key `0.0.6284762` owns staking **and** is the only LGS admin. It can brick every exit (`setPeriodForBonus(0)` → division by zero; `burnPercentage > 100`; removing the contract user; draining LGS), permanently if followed by `renounceOwnership` | High | **Change `0.0.6284762`'s Hedera account key to a threshold key list** (a CryptoUpdate; the account ID, and so every contract's owner/admin address, stays the same). That one change protects LazyLotto, LGS, staking and TradeLotto admin at once. Runbook: never call those setters or renounce | Bounded parameters, Ownable2Step, no renounce |
+| F3 | Withdrawal spends 1 tinybar of the **user's HBAR allowance** per 8-NFT batch; without it the user sees only `NFTTransferFailed(1)` | Medium; **the most common real failure** (19 failed unstakes; 72 of 86 stakers have no allowance today) | dApp grants ≥ 100 tinybar (checking remaining `amount`, not `amount_granted`) before every unstake | Pre-check through the HAS system contract with a clear error |
+| F4 | About 40 NFTs per transaction (50 child records); a 53-NFT unstake failed; 10 stakers hold > 40 | Medium | dApp chunks at ≤ 35 NFTs per transaction | One HTS call per batch, not per serial; enforced chunk size |
+| F5 | Signed exit depends on the backend signer, and reverts (underflow) if it signs more than `userRewards` | Medium | Add `unstakeAnyNFT` to the dApp as "exit without signature" (never used on mainnet so far). The signer must sign stake-time rates | Store per-serial rates at stake time |
+| F6 | The staking signer is trusted for reward rates; signer weaknesses could over-credit rewards and drain LGS (F1) | Medium | Signer hardening per the private dApp hand-off; hardware/KMS signer key; alerts on anomalous `userRewards` | Rates stored on-chain at stake time; EIP-712 signatures bound to contract, chain and nonce |
+| F7 | LGS is shared, and contract users get removed during clean-ups (six removals so far, the latest 2026-10-14) | Medium | Hard rule: never remove `0.0.7221488` or drain `0.0.7221483` while anything is staked; monitor `isContractUser` | Dedicated reserve |
+| F8 | Refill check routes exits through LGS if the contract's own HBAR or $LAZY falls below 20 units | Low | Never use its `transferHbar` / `retrieveLazy`; top up instead | — |
+| F9–F12 | Third-party collection admin key (Meerkat could delete its token, stranding 69 serials); contract expiry/rent if Hedera enforces it (LDR holds 0 HBAR); one staker not associated with $LAZY; remote halving-array bound | Low | Monitor; fund contracts if rent is announced | — |
+| F13 | Inherited HTS admin wrappers are callable by anyone (harmless while the contract holds no token keys) | Info | Never make it a key holder | Lite HTS base |
+| F14 | Farms `docs/FRONTEND_AGENT_GUIDE.md` and `deployments/mainnet.json` listed wrong EVM addresses for LAZY, SCT, LGS, LDR and staking. Three were **unrelated ECDSA accounts**, and the guide told integrators to approve $LAZY to one of them | Info, but dangerous | **Corrected 2026-10-15** in the Farms working tree (uncommitted); no app was using them | — |
+| F15 | Reward parameters apply retroactively to unclaimed periods | Info | A lever for winding down emissions, with obvious trust implications | — |
+
+**Migration** (an admin-forced move is impossible, and a migrator contract can't work because unstake only pays `msg.sender`):
+- **A. Withdraw-only legacy + voluntary migration with incentives (recommended).**
+  - Remove all stakeable collections to stop new stakes; unstake doesn't check them.
+  - The successor honours HODL tiers via a signed attestation captured before unstake.
+  - Requires funding LGS for all accrued rewards, or an openly announced cut.
+- **B. Virtual migration.** The NFTs stay put. A new rewards programme recognises them through `getStakedNFTs` / LDR delegation; old emissions are sunset with notice.
+- **C. Keep `0.0.7221488` as the product** and fix only operations (threshold key, funding policy, dApp fixes).
+- **Whatever the choice**, the old contract, its LGS user status, LGS funding, the LDR and a working unstake UI must stay live until the last NFT leaves, possibly forever (lost keys).
+
+**Ops actions now, whichever option:**
+1. Threshold key on `0.0.6284762`.
+2. LGS funding policy and alert.
+3. dApp unstake: auto allowance, chunking, an "exit without signature" option, and association pre-checks.
+
 ## E. Loose ends
 
 - **Delete the mainnet admin `.env`** from `hedera-SC-lazy-lotto` (it holds `0.0.6284762`'s key; gitignored but on disk) before adding testnet credentials.
@@ -145,6 +221,11 @@ LazyTradeLotto v2 and the minters.
 | 2026-10-14 | Decommission TradeLotto v1 (pause + remove from LGS), build v2 | v1 never used; signatures never expired; payout bounds missing |
 | 2026-10-14 | TradeLotto v2: owner switch for `code.length`, signed burn exemption, 24h payout cap | No redeploy at HIP-1340; removes six fragile lookups (TL-04/05); bounds a leaked signer (TL-03) |
 | 2026-10-14 | ForeverMinter / MinterContract: add the switch before launch | Non-upgradeable and not yet live: cheapest time to fix |
+| 2026-10-15 | Atomic-batch grinding is closed by the network, not by `tx.origin` | v0.76: a batch holds at most one EVM transaction, placed last. Docs corrected |
+| 2026-10-15 | Leave LazyLotto v2 unpaused until V3 | Owner's call; forensics clean (all calls plain top-level transactions from ordinary wallets) |
+| 2026-10-15 | **Move every draw to two stages (commit → settle from a future block hash)**, even if it needs a new shared contract | Caller checks lose to each new network feature; this holds whatever Hedera adds. Players still sign once with a keeper |
+| 2026-10-15 | New contracts get a sunset path | v2's prize inventory and the staking contract's NFTs show the cost of having none |
+| 2026-10-15 | `PRNG_CONTRACT_ID` default → `0.0.10583667` | `0.0.8257116` never returns its upper bound |
 
 ## Reference
 
@@ -159,6 +240,8 @@ LazyTradeLotto v2 and the minters.
 | MissionFactory / Mission template | `0.0.8257122` / `0.0.10646220` |
 | LazySecureTrade | `0.0.8051302` |
 | LazyTradeLotto v1 (retired) | `0.0.9109659` |
+| PRNG wrapper (inclusive; LazyLotto v2, Farms) / older (exclusive upper bound) | `0.0.10583667` / `0.0.8257116` |
+| LazyLotto v1 legacy (dormant, 0 prizes) | `0.0.10584509` |
 | LSH Gen1 / Gen2 / Gen1 Mutant | `0.0.768753` / `0.0.848553` / `0.0.1693200` |
 | $LAZY | `0.0.1311037` |
 
