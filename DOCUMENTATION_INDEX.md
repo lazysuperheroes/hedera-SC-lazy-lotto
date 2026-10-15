@@ -2,6 +2,8 @@
 
 This index provides a comprehensive overview of all documentation for the LazyLotto smart contract system. Use this as a starting point for understanding the project structure, implementation patterns, and integration approaches.
 
+> **In-progress security work:** [LAZY_HARDENING_ROADMAP.md](./LAZY_HARDENING_ROADMAP.md) tracks the hardening across LazyLotto, LazyTradeLotto, the Mission template, the minters and NFT staking, with pick-up prompts per workstream. Design for moving every draw to commit → settle: [LAZY_TWO_STAGE_DRAW_DESIGN.md](./LAZY_TWO_STAGE_DRAW_DESIGN.md). Latest review: [LAZY_REVIEW_2026-10-15.md](./LAZY_REVIEW_2026-10-15.md).
+
 ---
 
 ## Quick Links by Audience

@@ -58,6 +58,10 @@ node scripts/interactions/LazyLotto/user/buyEntry.js 0.0.CONTRACT_ID [poolId] [c
 
 See `scripts/interactions/README.md` for complete script documentation (41 scripts organized by contract).
 
+## In-Progress Work
+
+`LAZY_HARDENING_ROADMAP.md` is the starting point for the October 2026 hardening across Lazy contracts: status board, per-workstream steps and pick-up prompts. Check it before changing any roll, mint or draw. Since 2026-10-15 the plan is to move every draw to a two-stage commit → settle design (`LAZY_TWO_STAGE_DRAW_DESIGN.md`) rather than rely on `tx.origin` / `code.length` caller checks; review findings and their status are in `LAZY_REVIEW_2026-10-15.md`.
+
 ## Architecture Overview
 
 ### Core Contract Hierarchy
