@@ -110,6 +110,8 @@ Sophisticated security prevents abuse and replay attacks:
 ```solidity
 // Message format for signature validation
 bytes32 messageHash = keccak256(abi.encodePacked(
+    address(this),   // v2: this contract
+    block.chainid,   // v2: network
     msg.sender,      // Caller address
     token,           // NFT contract
     serial,          // NFT serial
@@ -117,12 +119,14 @@ bytes32 messageHash = keccak256(abi.encodePacked(
     buyer,           // Buyer/seller flag
     winRateThreshold,// Regular win rate
     minWinAmt,       // Min prize
-    maxWinAmt,       // Max prize
-    jackpotThreshold // Jackpot win rate
+    maxWinAmt,       // Max prize (must be <= maxWinAmtCap)
+    jackpotThreshold,// Jackpot win rate
+    burnExempt,      // v2: 0% burn (LSH holder / valid delegate, resolved off-chain)
+    deadline         // v2: signature expiry (unix seconds)
 ));
 ```
 
-The system wallet must sign these parameters to prevent parameter manipulation and ensure only legitimate trades can trigger lottery rolls.
+The system wallet must sign these parameters to prevent parameter manipulation and ensure only legitimate trades can trigger lottery rolls. In v2 the signature is bound to one contract on one network and expires at `deadline`; `getRollMessageHash(...)` returns this digest so the signer can verify its encoding. See [LazyTradeLotto-V2_SIGNER_GUIDE.md](./LazyTradeLotto-V2_SIGNER_GUIDE.md).
 
 ### 2. Random Number Generation
 

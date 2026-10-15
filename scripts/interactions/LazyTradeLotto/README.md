@@ -52,7 +52,7 @@ Information retrieval - no transactions, no gas costs
 | Script | Description | Usage | Status |
 |--------|-------------|-------|--------|
 | `getLottoInfo.js` | Complete contract state | `node queries/getLottoInfo.js <contractId>` | ✅ Complete |
-| `getUserBurn.js` | Check user's burn percentage | `node queries/getUserBurn.js <contractId> <userAddress>` | ✅ Complete |
+| `getUserBurn.js` | v2: resolve the `burnExempt` flag to sign (LSH holder or valid delegate) | `node queries/getUserBurn.js <contractId> <userAddress>` | ✅ Complete |
 | `checkTradeHistory.js` | Check if trade already rolled | `node queries/checkTradeHistory.js <contractId> <token> <serial> <nonce> <buyer>` | ✅ Complete |
 | `getLottoLogs.js` | Query lottery events from mirror node | `node queries/getLottoLogs.js <contractId>` | ✅ Migrated |
 
@@ -398,6 +398,8 @@ All `rollLotto()` calls require a valid signature from `systemWallet`:
 ```javascript
 // Message signed by systemWallet
 messageHash = keccak256(abi.encodePacked(
+    address(this),       // v2: the LazyTradeLotto contract
+    block.chainid,       // v2: 295 mainnet / 296 testnet
     msg.sender,          // User calling the function
     token,               // NFT contract address
     serial,              // NFT serial number
@@ -405,10 +407,14 @@ messageHash = keccak256(abi.encodePacked(
     buyer,               // Buyer (true) or seller (false)
     winRateThreshold,    // Win probability
     minWinAmt,           // Prize range min
-    maxWinAmt,           // Prize range max
-    jackpotThreshold     // Jackpot probability
+    maxWinAmt,           // Prize range max (<= maxWinAmtCap)
+    jackpotThreshold,    // Jackpot probability
+    burnExempt,          // v2: 0% burn for LSH holders / valid delegates (decided by the signer)
+    deadline             // v2: unix seconds; rollLotto passes the same values
 ));
 ```
+
+The `testing/` scripts sign in this format (`--contract`, `--ttl`, `--burnExempt`); `rollLottoTest.js` pre-flights the digest against the contract's `getRollMessageHash`, the win cap, the 24h payout window and the resolved burn exemption. Admin: `admin/updateMaxWinCap.js`, `admin/updatePayoutWindowCap.js`, `admin/setRequireCodelessCaller.js` (HIP-1340 guard; enable only after testnet validation). See [LazyTradeLotto-V2_SIGNER_GUIDE.md](../../../LazyTradeLotto-V2_SIGNER_GUIDE.md).
 
 ### Replay Protection
 Each trade is tracked by hash to prevent duplicate rolls:

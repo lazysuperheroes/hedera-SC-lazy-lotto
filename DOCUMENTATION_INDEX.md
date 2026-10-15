@@ -11,6 +11,8 @@ This index provides a comprehensive overview of all documentation for the LazyLo
 |----------|---------|
 | [LazyLotto UX Implementation Guide](./LazyLotto-UX_IMPLEMENTATION_GUIDE.md) | Complete guide for user-facing flows (buy tickets, roll, claim prizes) |
 | [LazyTradeLotto UX Implementation Guide](./LazyTradeLotto-UX_IMPLEMENTATION_GUIDE.md) | Trade-triggered lottery integration (signature flow, jackpot, NFT benefits) |
+| [LazyTradeLotto v2 Signer Guide](./LazyTradeLotto-V2_SIGNER_GUIDE.md) | v2 signed-message format, deadline, signer/client changes, test vector, rollout order |
+| [LazyTradeLotto v2 Ship Checklist](./LazyTradeLotto-V2_SHIP_CHECKLIST.md) | Cross-repo tasks to ship v2, plus open contract items |
 | [Admin UX Implementation Guide](./LazyLotto-ADMIN_UX_IMPLEMENTATION_GUIDE.md) | Admin operations and community pool owner flows |
 | [NPM Package Guide](./NPM_PACKAGE_GUIDE.md) | Package structure for dApp integration |
 | [Business Logic](./LazyLotto-BUSINESS_LOGIC.md) | Game mechanics and rules |
@@ -49,6 +51,7 @@ This index provides a comprehensive overview of all documentation for the LazyLo
 |------|------|----------|-------------|
 | [LazyLotto-UX_IMPLEMENTATION_GUIDE.md](./LazyLotto-UX_IMPLEMENTATION_GUIDE.md) | 66KB | Frontend devs | User flows: browse pools, buy tickets, roll, claim prizes |
 | [LazyTradeLotto-UX_IMPLEMENTATION_GUIDE.md](./LazyTradeLotto-UX_IMPLEMENTATION_GUIDE.md) | 35KB | Frontend devs | Trade-triggered lottery: signature flow, jackpot, LSH NFT benefits, admin |
+| [LazyTradeLotto-V2_SIGNER_GUIDE.md](./LazyTradeLotto-V2_SIGNER_GUIDE.md) | 10KB | Backend/frontend devs | v2 migration: signed message, deadline, client args, self-checks, test vector |
 | [LazyLotto-ADMIN_UX_IMPLEMENTATION_GUIDE.md](./LazyLotto-ADMIN_UX_IMPLEMENTATION_GUIDE.md) | 45KB+ | Admin dashboard devs | Admin operations, community pool management |
 
 ### Business & Design Documentation

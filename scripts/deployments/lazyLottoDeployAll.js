@@ -226,9 +226,8 @@ Optional .env Variables (reuse existing contracts):
 
 For LazyTradeLotto (--include-trade-lotto):
   SIGNING_KEY           ECDSA private key for signature validation
-  LSH_GEN1_TOKEN_ID     LSH Gen1 NFT token
-  LSH_GEN2_TOKEN_ID     LSH Gen2 NFT token
-  LSH_GEN1_MUTANT_TOKEN_ID  LSH Gen1 Mutant NFT token
+  LOTTO_MAX_WIN_CAP     Largest maxWinAmt the signer may sign (in LAZY)
+  LOTTO_PAYOUT_WINDOW_CAP  Most LAZY payable per 24h window (in LAZY)
   INITIAL_LOTTO_JACKPOT Initial jackpot amount (in LAZY)
   LOTTO_LOSS_INCREMENT  Jackpot increment on losses (in LAZY)
   LAZY_BURN_PERCENT     Burn percentage (0-100)
@@ -678,12 +677,15 @@ async function stepTradeLotto() {
 
 	updateStep(STEPS.TRADE_LOTTO);
 
+	// reuse only a v2 contract: v1 (0.0.9109659 on mainnet) is retired and must not be re-wired
+	state.tradeLottoReused = Boolean(process.env.LAZY_TRADE_LOTTO_CONTRACT_ID);
+
 	state.contracts.tradeLotto = await deployOrReuse(
 		'LazyTradeLotto',
 		'LAZY_TRADE_LOTTO_CONTRACT_ID',
 		async () => {
-			// Validate required env vars
-			const required = ['SIGNING_KEY', 'LSH_GEN1_TOKEN_ID', 'LSH_GEN2_TOKEN_ID', 'LSH_GEN1_MUTANT_TOKEN_ID'];
+			// Validate required env vars (v2: the LSH burn exemption is signed per roll, not looked up on-chain)
+			const required = ['SIGNING_KEY', 'LOTTO_MAX_WIN_CAP', 'LOTTO_PAYOUT_WINDOW_CAP'];
 			for (const envVar of required) {
 				if (!process.env[envVar]) {
 					throw new Error(`${envVar} required for LazyTradeLotto deployment`);
@@ -699,18 +701,23 @@ async function stepTradeLotto() {
 			const initialJackpot = parseInt(process.env.INITIAL_LOTTO_JACKPOT ?? '2000') * (10 ** decimals);
 			const lossIncrement = parseInt(process.env.LOTTO_LOSS_INCREMENT ?? '50') * (10 ** decimals);
 			const burnPercent = parseInt(process.env.LAZY_BURN_PERCENT ?? '25');
+			const maxWinAmtCap = parseInt(process.env.LOTTO_MAX_WIN_CAP) * (10 ** decimals);
+			const payoutWindowCap = parseInt(process.env.LOTTO_PAYOUT_WINDOW_CAP) * (10 ** decimals);
+			// the constructor requires the window to fit a full jackpot (default max 500,000 base
+			// units) plus a maximum regular win
+			if (payoutWindowCap < 500_000 + maxWinAmtCap) {
+				throw new Error(`LOTTO_PAYOUT_WINDOW_CAP must be at least ${(500_000 + maxWinAmtCap) / (10 ** decimals)} LAZY (max jackpot + LOTTO_MAX_WIN_CAP)`);
+			}
 
 			const params = new ContractFunctionParameters()
 				.addAddress(state.contracts.prng.toSolidityAddress())
 				.addAddress(state.contracts.lazyGasStation.toSolidityAddress())
-				.addAddress(state.contracts.lazyDelegateRegistry.toSolidityAddress())
-				.addAddress(TokenId.fromString(process.env.LSH_GEN1_TOKEN_ID).toSolidityAddress())
-				.addAddress(TokenId.fromString(process.env.LSH_GEN2_TOKEN_ID).toSolidityAddress())
-				.addAddress(TokenId.fromString(process.env.LSH_GEN1_MUTANT_TOKEN_ID).toSolidityAddress())
 				.addAddress(signingWallet.address)
 				.addUint256(initialJackpot)
 				.addUint256(lossIncrement)
-				.addUint256(burnPercent);
+				.addUint256(burnPercent)
+				.addUint256(maxWinAmtCap)
+				.addUint256(payoutWindowCap);
 
 			const [id] = await contractDeployFunction(
 				client,
@@ -729,6 +736,15 @@ async function stepTradeLotto() {
 		state.contracts.tradeLotto = ContractId.fromString(state.contracts.tradeLotto);
 	}
 
+	if (state.tradeLottoReused) {
+		try {
+			await queryContract(env, state.contracts.tradeLotto, interfaces.tradeLotto.abi, 'maxWinAmtCap', [], operatorId);
+		}
+		catch {
+			throw new Error(`LAZY_TRADE_LOTTO_CONTRACT_ID (${state.contracts.tradeLotto}) is not a v2 LazyTradeLotto (no maxWinAmtCap). Clear it from .env to deploy v2.`);
+		}
+	}
+
 	saveState();
 }
 
@@ -738,6 +754,13 @@ async function stepConfigureTradeLotto() {
 	}
 
 	updateStep(STEPS.CONFIGURE_TRADE_LOTTO);
+
+	if (state.tradeLottoReused) {
+		console.log('Reused an existing LazyTradeLotto: not re-adding it to LazyGasStation.');
+		console.log('If it needs to pay out, add it with scripts/interactions/LazyGasStation/addContractUser.js.');
+		saveState();
+		return;
+	}
 
 	console.log('Adding LazyTradeLotto to LazyGasStation...');
 

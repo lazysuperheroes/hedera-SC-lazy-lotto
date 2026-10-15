@@ -9,12 +9,10 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Pausable} from "@openzeppelin/contracts/security/Pausable.sol";
 
 import {IPrngSystemContract} from "./interfaces/IPrngSystemContract.sol";
 import {ILazyGasStation} from "./interfaces/ILazyGasStation.sol";
-import {ILazyDelegateRegistry} from "./interfaces/ILazyDelegateRegistry.sol";
 
 contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
     using Address for address;
@@ -54,6 +52,9 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
     error InvalidTeamSignature();
     error BadArguments(string message);
     error AlreadyRolled();
+    error SignatureExpired();
+    error OnlyEOA();
+    error PayoutCapReached();
 
     /// @notice Mapping to track rolls that have been made to prevent replay attacks
     /// @dev Maps hash of transaction details to a boolean indicating if it has been processed
@@ -63,19 +64,17 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
     /// @dev Expressed as integer from 0-100,000,000 where 100,000,000 represents 100%
     uint256 public constant MAX_WIN_RATE_THRESHOLD = 100_000_000;
 
-    /// @notice Address of the LSH Gen 1 NFT contract
-    address public immutable LSH_GEN1;
-    /// @notice Address of the LSH Gen 2 NFT contract
-    address public immutable LSH_GEN2;
-    /// @notice Address of the LSH Gen 1 Mutant NFT contract
-    address public immutable LSH_GEN1_MUTANT;
+    /// @notice Length of the payout window that payoutWindowCap applies to
+    uint256 public constant PAYOUT_WINDOW = 1 days;
+
+    /// @notice Furthest in the future a signed deadline may be
+    /// @dev Stops a signer bug (e.g. milliseconds passed as seconds) minting never-expiring signatures
+    uint256 public constant MAX_SIGNATURE_TTL = 1 hours;
 
     /// @notice Interface to the PRNG system contract for random number generation
     IPrngSystemContract public prngSystemContract;
     /// @notice Interface to the Lazy Gas Station contract for token payouts
     ILazyGasStation public lazyGasStation;
-    /// @notice Interface to the Lazy Delegate Registry contract for NFT delegation
-    ILazyDelegateRegistry public lazyDelegateRegistry;
 
     /// @notice Address of the wallet that signs transaction parameters
     address public systemWallet;
@@ -97,34 +96,51 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
     /// @notice Amount to increment the jackpot by on each roll
     uint256 public lottoLossIncrement;
 
-    /// @notice Percentage of winnings to burn for non-NFT holders
+    /// @notice Percentage of winnings to burn unless the signed roll is burn-exempt
     uint256 public burnPercentage;
+
+    /// @notice Upper bound on the signed maxWinAmt of any roll
+    /// @dev Bounds what a leaked or buggy systemWallet signer can pay out per regular win
+    uint256 public maxWinAmtCap;
+
+    /// @notice Most $LAZY (regular wins + jackpots) payable within one PAYOUT_WINDOW
+    /// @dev Bounds total loss from a leaked signer, which could otherwise roll repeatedly at
+    ///      maxWinAmtCap each; rolls that would exceed it revert until the window resets.
+    ///      Must be at least maxJackpotPool + maxWinAmtCap, so a full jackpot plus a regular win
+    ///      always fits in an empty window.
+    uint256 public payoutWindowCap;
+    /// @notice Start of the current payout window (resets on the first payout after it ends)
+    uint256 public payoutWindowStart;
+    /// @notice Amount paid out in the current payout window
+    uint256 public payoutWindowPaid;
+
+    /// @notice When true, rolls also require msg.sender to have no code
+    /// @dev Off by default. HIP-1340 (EIP-7702) delegated EOAs pass tx.origin == msg.sender but
+    ///      report a delegation indicator as code; enable once that is validated on testnet.
+    bool public requireCodelessCaller;
 
     /**
      * @notice Initialize the LazyTradeLotto contract with required parameters
      * @dev Sets up all necessary references and initial values
      * @param _prngSystemContract Address of the PRNG system contract for random number generation
      * @param _lazyGasStation Address of the Lazy Gas Station for token payouts
-     * @param _lazyDelegateRegistry Address of the Lazy Delegate Registry for NFT delegation
-     * @param _lshGen1 Address of the LSH Gen 1 NFT contract
-     * @param _lshGen2 Address of the LSH Gen 2 NFT contract
-     * @param _lshGen1Mutant Address of the LSH Gen 1 Mutant NFT contract
      * @param _systemWallet Address of the wallet that signs transaction parameters
-     * @param _initialJackpot Initial amount in the jackpot pool
+     * @param _initialJackpot Initial amount in the jackpot pool (clamped to maxJackpotPool)
      * @param _lottoLossIncrement Amount to increment the jackpot by on each roll
-     * @param _burnPercentage Percentage of winnings to burn for non-NFT holders
+     * @param _burnPercentage Percentage of winnings to burn unless the roll is burn-exempt (0-100)
+     * @param _maxWinAmtCap Upper bound on the signed maxWinAmt of any roll
+     * @param _payoutWindowCap Most $LAZY payable within one PAYOUT_WINDOW (at least the default
+     *        maxJackpotPool of 500,000 plus _maxWinAmtCap)
      */
     constructor(
         address _prngSystemContract,
         address _lazyGasStation,
-        address _lazyDelegateRegistry,
-        address _lshGen1,
-        address _lshGen2,
-        address _lshGen1Mutant,
         address _systemWallet,
         uint256 _initialJackpot,
         uint256 _lottoLossIncrement,
-        uint256 _burnPercentage
+        uint256 _burnPercentage,
+        uint256 _maxWinAmtCap,
+        uint256 _payoutWindowCap
     ) {
         if (
             !_prngSystemContract.isContract() ||
@@ -138,35 +154,29 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
         if (_systemWallet == address(0)) {
             revert BadArguments("System Wallet");
         }
-        if (
-            _lshGen1 == address(0) ||
-            _lshGen2 == address(0) ||
-            _lshGen1Mutant == address(0)
-        ) {
-            revert BadArguments("LSH Tokens");
+        if (_maxWinAmtCap == 0) {
+            revert BadArguments("Max Win Cap");
         }
-        if (
-            !_lazyDelegateRegistry.isContract() ||
-            _lazyDelegateRegistry == address(0)
-        ) {
-            revert BadArguments("Lazy Delegate Registry");
+        if (_burnPercentage > 100) {
+            revert BadArguments("Burn Percentage");
         }
+
+        // Default maximum jackpot pool to 500,000
+        uint256 _maxJackpotPool = 500_000; // Assuming LAZY_DECIMAL is 1
+        checkPayoutCaps(_maxJackpotPool, _maxWinAmtCap, _payoutWindowCap);
 
         prngSystemContract = IPrngSystemContract(_prngSystemContract);
         lazyGasStation = ILazyGasStation(_lazyGasStation);
-        lazyDelegateRegistry = ILazyDelegateRegistry(_lazyDelegateRegistry);
         systemWallet = _systemWallet;
 
-        LSH_GEN1 = _lshGen1;
-        LSH_GEN2 = _lshGen2;
-        LSH_GEN1_MUTANT = _lshGen1Mutant;
-
-        jackpotPool = _initialJackpot;
+        maxJackpotPool = _maxJackpotPool;
+        jackpotPool = _initialJackpot > _maxJackpotPool
+            ? _maxJackpotPool
+            : _initialJackpot;
         lottoLossIncrement = _lottoLossIncrement;
         burnPercentage = _burnPercentage;
-
-        // Default maximum jackpot pool to 500,000
-        maxJackpotPool = 500_000; // Assuming LAZY_DECIMAL is 1
+        maxWinAmtCap = _maxWinAmtCap;
+        payoutWindowCap = _payoutWindowCap;
 
         // Initialize as paused by default for safety
         _pause();
@@ -183,6 +193,8 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
      * @param minWinAmt Minimum amount that can be won in a regular win
      * @param maxWinAmt Maximum amount that can be won in a regular win
      * @param jackpotThreshold Threshold for winning the jackpot (0-100,000,000)
+     * @param burnExempt True if the signer resolved the roller as an LSH holder / valid delegate (0% burn)
+     * @param deadline Unix time (seconds) after which the signature is no longer accepted
      * @param teamSignature Signature from the system wallet validating these parameters
      */
     function rollLotto(
@@ -194,12 +206,31 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
         uint256 minWinAmt,
         uint256 maxWinAmt,
         uint256 jackpotThreshold,
+        bool burnExempt,
+        uint256 deadline,
         bytes memory teamSignature
     ) external nonReentrant whenNotPaused {
+        // The outcome is drawn and paid in this transaction, so a caller able to run code after
+        // it could revert a losing roll (un-setting history) and retry with a fresh PRNG seed.
+        // The off-chain signer only signs for EOAs calling directly; this enforces it on-chain.
+        // HIP-1340 (EIP-7702) delegated EOAs still pass tx.origin == msg.sender, so the owner can
+        // additionally require codeless callers once delegation is validated on testnet.
+        // Limits: atomic batches are blocked by the network rule (one EVM tx per batch, last),
+        // not by this check, and caller checks can't keep up with new network features. The
+        // durable fix is the two-stage draw in LAZY_HARDENING_ROADMAP.md.
+        if (
+            // solhint-disable-next-line avoid-tx-origin
+            msg.sender != tx.origin ||
+            (requireCodelessCaller && msg.sender.code.length != 0)
+        ) {
+            revert OnlyEOA();
+        }
+
         // each trade can be rolled by both the buyer and the seller but only once
         bytes32 hash = keccak256(abi.encodePacked(token, serial, nonce, buyer));
 
-        // design note: not using timestamp as history of rolls is used to prevent replay attacks
+        // design note: history (not the deadline) is the replay guard. The deadline only bounds how
+        // long a signature stays usable; an unrolled ticket can be re-signed with a new deadline.
 
         if (history[hash]) {
             revert AlreadyRolled();
@@ -218,8 +249,12 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
             minWinAmt,
             maxWinAmt,
             jackpotThreshold,
+            burnExempt,
+            deadline,
             teamSignature
         );
+
+        uint256 burn = burnExempt ? 0 : burnPercentage;
 
         // Get random rolls and process the lotto roll
         uint256[] memory winRolls = prngSystemContract
@@ -231,11 +266,12 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
             minWinAmt,
             maxWinAmt,
             nonce,
-            winRolls[0]
+            winRolls[0],
+            burn
         );
 
         // Check for jackpot win
-        processJackpotWin(jackpotThreshold, winRolls[1]);
+        processJackpotWin(jackpotThreshold, winRolls[1], burn);
 
         // Update the stats and emit events
         totalRolls += 1;
@@ -268,6 +304,8 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
      * @param minWinAmt Minimum amount that can be won
      * @param maxWinAmt Maximum amount that can be won
      * @param jackpotThreshold Threshold for winning the jackpot
+     * @param burnExempt Whether the signer marked the roller as burn-exempt
+     * @param deadline Unix time (seconds) after which the signature is no longer accepted
      * @param teamSignature Signature from the system wallet
      * @return bool True if all parameters are valid
      */
@@ -280,8 +318,17 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
         uint256 minWinAmt,
         uint256 maxWinAmt,
         uint256 jackpotThreshold,
+        bool burnExempt,
+        uint256 deadline,
         bytes memory teamSignature
     ) internal view returns (bool) {
+        if (block.timestamp > deadline) {
+            revert SignatureExpired();
+        }
+        if (deadline > block.timestamp + MAX_SIGNATURE_TTL) {
+            revert BadArguments("Deadline");
+        }
+
         // check the parameters are valid
         if (token == address(0) || serial == 0) {
             revert BadArguments("Trade Params");
@@ -289,6 +336,10 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
 
         if (minWinAmt > maxWinAmt || maxWinAmt == 0) {
             revert BadArguments("Win Amounts");
+        }
+
+        if (maxWinAmt > maxWinAmtCap) {
+            revert BadArguments("Win Cap");
         }
 
         if (winRateThreshold > MAX_WIN_RATE_THRESHOLD) {
@@ -299,9 +350,8 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
             revert BadArguments("Jackpot Rate");
         }
 
-        // Create the raw message
-        bytes32 messageHash = keccak256(
-            abi.encodePacked(
+        bytes32 ethSignedMessageHash = ECDSA.toEthSignedMessageHash(
+            getRollMessageHash(
                 msg.sender,
                 token,
                 serial,
@@ -310,12 +360,10 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
                 winRateThreshold,
                 minWinAmt,
                 maxWinAmt,
-                jackpotThreshold
+                jackpotThreshold,
+                burnExempt,
+                deadline
             )
-        );
-
-        bytes32 ethSignedMessageHash = ECDSA.toEthSignedMessageHash(
-            messageHash
         );
 
         address recoveredSigner = ECDSA.recover(
@@ -331,6 +379,57 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
     }
 
     /**
+     * @notice The digest the systemWallet signs (EIP-191 personal_sign) to authorise a roll
+     * @dev Binds this contract and chain so a signature cannot be replayed on another deployment
+     *      or network that shares the signer key. Exposed so the off-chain signer can check its
+     *      encoding against the deployed contract.
+     * @param roller The address that will call rollLotto (msg.sender)
+     * @param token The address of the NFT token contract
+     * @param serial The token ID/serial of the NFT
+     * @param nonce A unique number for this trade
+     * @param buyer Whether the roller is the buyer or seller
+     * @param winRateThreshold Threshold for winning a regular prize
+     * @param minWinAmt Minimum amount that can be won
+     * @param maxWinAmt Maximum amount that can be won
+     * @param jackpotThreshold Threshold for winning the jackpot
+     * @param burnExempt Whether the roller pays 0% burn (LSH holder / valid delegate, resolved off-chain)
+     * @param deadline Unix time (seconds) after which the signature is no longer accepted
+     * @return The keccak256 of the packed message, before the EIP-191 prefix
+     */
+    function getRollMessageHash(
+        address roller,
+        address token,
+        uint256 serial,
+        uint256 nonce,
+        bool buyer,
+        uint256 winRateThreshold,
+        uint256 minWinAmt,
+        uint256 maxWinAmt,
+        uint256 jackpotThreshold,
+        bool burnExempt,
+        uint256 deadline
+    ) public view returns (bytes32) {
+        return
+            keccak256(
+                abi.encodePacked(
+                    address(this),
+                    block.chainid,
+                    roller,
+                    token,
+                    serial,
+                    nonce,
+                    buyer,
+                    winRateThreshold,
+                    minWinAmt,
+                    maxWinAmt,
+                    jackpotThreshold,
+                    burnExempt,
+                    deadline
+                )
+            );
+    }
+
+    /**
      * @notice Processes a regular win condition and pays out if won
      * @dev Compares random roll against threshold and pays out if winner
      * @param winRateThreshold Threshold for winning (0-100,000,000)
@@ -338,6 +437,7 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
      * @param maxWinAmt Maximum amount that can be won
      * @param nonce The nonce used for random number generation
      * @param randomRoll The random number generated for this roll
+     * @param burn The burn percentage to apply to the payout
      * @return winAmt The amount won (0 if no win)
      */
     function processRegularWin(
@@ -345,7 +445,8 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
         uint256 minWinAmt,
         uint256 maxWinAmt,
         uint256 nonce,
-        uint256 randomRoll
+        uint256 randomRoll,
+        uint256 burn
     ) private returns (uint256 winAmt) {
         winAmt = 0;
         if (winRateThreshold >= randomRoll) {
@@ -356,15 +457,16 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
                 maxWinAmt + nonce
             );
 
-            // pay the winner
-            lazyGasStation.payoutLazy(
-                msg.sender,
-                winAmt,
-                getBurnForUser(msg.sender)
-            );
+            // A zero draw (possible when minWinAmt == 0) pays nothing: LazyGasStation rejects
+            // zero payouts, and reverting would re-arm the ticket for a fresh draw.
+            if (winAmt > 0) {
+                // pay the winner
+                recordPayout(winAmt);
+                lazyGasStation.payoutLazy(msg.sender, winAmt, burn);
 
-            totalWins += 1;
-            totalPaid += winAmt;
+                totalWins += 1;
+                totalPaid += winAmt;
+            }
         }
         return winAmt;
     }
@@ -374,21 +476,23 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
      * @dev Compares random roll against threshold and pays out if jackpot winner
      * @param jackpotThreshold Threshold for winning the jackpot (0-100,000,000)
      * @param randomRoll The random number generated for this roll
+     * @param burn The burn percentage to apply to the payout
      */
     function processJackpotWin(
         uint256 jackpotThreshold,
-        uint256 randomRoll
+        uint256 randomRoll,
+        uint256 burn
     ) private {
-        if (jackpotThreshold >= randomRoll) {
+        // An empty pool (possible when lottoLossIncrement or maxJackpotPool is 0) is not a win:
+        // LazyGasStation rejects zero payouts, and reverting would re-arm the ticket.
+        // JackpotWin, not the LottoRoll jackpot roll, is the authoritative record of a jackpot.
+        if (jackpotThreshold >= randomRoll && jackpotPool > 0) {
             // we have a jackpot winner!
             uint256 jackpotAmt = jackpotPool;
 
             // pay the jackpot winner
-            lazyGasStation.payoutLazy(
-                msg.sender,
-                jackpotAmt,
-                getBurnForUser(msg.sender)
-            );
+            recordPayout(jackpotAmt);
+            lazyGasStation.payoutLazy(msg.sender, jackpotAmt, burn);
 
             // update the jackpot stats
             jackpotPool = 0;
@@ -415,14 +519,117 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
     }
 
     /**
-     * @notice Increases the jackpot pool by a specified amount
-     * @dev Can only be called by the contract owner
+     * @notice Counts a payout against the current payout window, starting a new window if the
+     *         previous one has ended
+     * @dev Reverts PayoutCapReached if the window total would exceed payoutWindowCap. That reverts
+     *      the whole roll (the ticket can be rolled again once the window resets), which is the
+     *      intended circuit-breaker behaviour: set the cap well above normal daily payouts.
+     * @param amount The gross payout (before burn)
+     */
+    function recordPayout(uint256 amount) private {
+        if (block.timestamp >= payoutWindowStart + PAYOUT_WINDOW) {
+            payoutWindowStart = block.timestamp;
+            payoutWindowPaid = 0;
+        }
+        payoutWindowPaid += amount;
+        if (payoutWindowPaid > payoutWindowCap) {
+            revert PayoutCapReached();
+        }
+    }
+
+    /**
+     * @notice Reverts unless an empty payout window fits a full jackpot plus a maximum regular win
+     * @dev Otherwise a jackpot hit could never be paid: it would revert PayoutCapReached forever
+     */
+    function checkPayoutCaps(
+        uint256 _maxJackpotPool,
+        uint256 _maxWinAmtCap,
+        uint256 _payoutWindowCap
+    ) private pure {
+        if (_payoutWindowCap < _maxJackpotPool + _maxWinAmtCap) {
+            revert BadArguments("Payout Window Cap");
+        }
+    }
+
+    /**
+     * @notice The current payout window and how much can still be paid in it
+     * @return start Start of the current window (0 if no window is open: before the first payout
+     *         or after the last window ended; the next payout opens a new one)
+     * @return paid Amount paid in the current window
+     * @return cap The window cap
+     * @return remaining Amount still payable before PayoutCapReached
+     */
+    function getPayoutWindow()
+        external
+        view
+        returns (uint256 start, uint256 paid, uint256 cap, uint256 remaining)
+    {
+        cap = payoutWindowCap;
+        if (block.timestamp >= payoutWindowStart + PAYOUT_WINDOW) {
+            // the next payout starts a fresh window
+            return (0, 0, cap, cap);
+        }
+        start = payoutWindowStart;
+        paid = payoutWindowPaid;
+        remaining = paid >= cap ? 0 : cap - paid;
+    }
+
+    /**
+     * @notice Increases the jackpot pool by a specified amount, up to maxJackpotPool
+     * @dev Can only be called by the contract owner. Emits the new pool total, like rollLotto.
      * @param amount The amount to add to the jackpot pool
      */
     function boostJackpot(uint256 amount) external onlyOwner {
         jackpotPool += amount;
+        if (jackpotPool > maxJackpotPool) {
+            jackpotPool = maxJackpotPool;
+        }
 
-        emit JackpotUpdate(amount);
+        emit JackpotUpdate(jackpotPool);
+    }
+
+    /**
+     * @notice Updates the upper bound on the signed maxWinAmt of any roll
+     * @dev Can only be called by the contract owner
+     * @param cap The new cap (must be non-zero)
+     */
+    function updateMaxWinAmtCap(uint256 cap) external onlyOwner {
+        if (cap == 0) {
+            revert BadArguments("Max Win Cap");
+        }
+        checkPayoutCaps(maxJackpotPool, cap, payoutWindowCap);
+        maxWinAmtCap = cap;
+
+        emit ContractUpdate("MaxWinAmtCap", msg.sender, cap, "Updated");
+    }
+
+    /**
+     * @notice Updates the most $LAZY payable within one PAYOUT_WINDOW
+     * @dev Can only be called by the contract owner
+     * @param cap The new window cap (at least maxJackpotPool + maxWinAmtCap)
+     */
+    function updatePayoutWindowCap(uint256 cap) external onlyOwner {
+        checkPayoutCaps(maxJackpotPool, maxWinAmtCap, cap);
+        payoutWindowCap = cap;
+
+        emit ContractUpdate("PayoutWindowCap", msg.sender, cap, "Updated");
+    }
+
+    /**
+     * @notice Requires (or stops requiring) roll callers to have no code
+     * @dev Can only be called by the contract owner. Enable once HIP-1340 code delegation is live
+     *      and validated on testnet: delegated EOAs report a delegation indicator as code.
+     * @param enabled True to reject callers whose address has code
+     */
+    function setRequireCodelessCaller(bool enabled) external onlyOwner {
+        requireCodelessCaller = enabled;
+
+        emit ContractUpdate(
+            "RequireCodelessCaller",
+            msg.sender,
+            enabled ? 1 : 0,
+            "Updated"
+        );
     }
 
     /**
@@ -443,11 +650,16 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
 
     /**
      * @notice Updates the maximum threshold for the jackpot pool
-     * @dev Can only be called by the contract owner
+     * @dev Can only be called by the contract owner. Clamps the current pool to the new maximum.
      * @param maxThreshold The new maximum jackpot threshold
      */
     function updateMaxJackpotPool(uint256 maxThreshold) external onlyOwner {
+        checkPayoutCaps(maxThreshold, maxWinAmtCap, payoutWindowCap);
         maxJackpotPool = maxThreshold;
+        if (jackpotPool > maxThreshold) {
+            jackpotPool = maxThreshold;
+            emit JackpotUpdate(jackpotPool);
+        }
 
         emit ContractUpdate(
             "MaxJackpotPool",
@@ -463,6 +675,10 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
      * @param percentage The new burn percentage (0-100)
      */
     function updateBurnPercentage(uint256 percentage) external onlyOwner {
+        // LazyGasStation rejects > 100, which would make every non-exempt win revert
+        if (percentage > 100) {
+            revert BadArguments("Burn Percentage");
+        }
         burnPercentage = percentage;
 
         emit ContractUpdate(
@@ -479,35 +695,12 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
      * @param newWallet The address of the new system wallet
      */
     function updateSystemWallet(address newWallet) external onlyOwner {
+        if (newWallet == address(0)) {
+            revert BadArguments("System Wallet");
+        }
         systemWallet = newWallet;
 
         emit ContractUpdate("SystemWallet", msg.sender, 0, "Updated");
-    }
-
-    /**
-     * @notice Determines the burn percentage to apply for a specific user
-     * @dev Users who hold or have delegated access to LSH NFTs get 0% burn
-     * @param _user The address of the user to check
-     * @return uint256 The burn percentage to apply (0% for NFT holders, burnPercentage for others)
-     */
-    function getBurnForUser(address _user) public view returns (uint256) {
-        if (
-            IERC721(LSH_GEN1).balanceOf(_user) > 0 ||
-            IERC721(LSH_GEN2).balanceOf(_user) > 0 ||
-            IERC721(LSH_GEN1_MUTANT).balanceOf(_user) > 0 ||
-            lazyDelegateRegistry.getSerialsDelegatedTo(_user, LSH_GEN1).length >
-            0 ||
-            lazyDelegateRegistry.getSerialsDelegatedTo(_user, LSH_GEN2).length >
-            0 ||
-            lazyDelegateRegistry
-                .getSerialsDelegatedTo(_user, LSH_GEN1_MUTANT)
-                .length >
-            0
-        ) {
-            return 0;
-        } else {
-            return burnPercentage;
-        }
     }
 
     /**
@@ -638,17 +831,11 @@ contract LazyTradeLotto is Ownable, ReentrancyGuard, Pausable {
 
     /**
      * @notice Default function to receive HBAR
-     * @dev Triggered when HBAR is sent to the contract
+     * @dev Triggered when HBAR is sent to the contract. There is deliberately no fallback():
+     *      a call with an unknown or stale selector must revert, not succeed silently, or an
+     *      off-chain check of "a successful call to the lotto" could mistake it for a roll.
      */
     receive() external payable {
         emit ContractUpdate("Receive", msg.sender, msg.value, "Received HBAR");
-    }
-
-    /**
-     * @notice Fallback function that's triggered when the contract is called with non-existent functions
-     * @dev Also allows receiving HBAR
-     */
-    fallback() external payable {
-        emit ContractUpdate("Fallback", msg.sender, msg.value, "Fallback");
     }
 }

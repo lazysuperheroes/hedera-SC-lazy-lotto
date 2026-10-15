@@ -104,8 +104,8 @@ const main = async () => {
 
 	const newThreshold = Number(args[1]);
 
-	if (isNaN(newThreshold) || newThreshold <= 0) {
-		console.log('ERROR: Maximum jackpot threshold must be a positive number');
+	if (isNaN(newThreshold) || newThreshold < 0) {
+		console.log('ERROR: Maximum jackpot threshold must be zero or a positive number');
 		return;
 	}
 
@@ -113,6 +113,25 @@ const main = async () => {
 
 	// Calculate the threshold with decimals
 	const thresholdWithDecimals = Math.floor(newThreshold * (10 ** lazyTokenDecimals));
+
+	// The contract requires payoutWindowCap >= maxJackpotPool + maxWinAmtCap (otherwise a full
+	// jackpot could never be paid); check here for a clear message instead of a revert.
+	const [poolMaxRes, winCapRes, windowCapRes] = await Promise.all([
+		queryContract(env, contractId, ltlIface, 'maxJackpotPool', [], operatorId),
+		queryContract(env, contractId, ltlIface, 'maxWinAmtCap', [], operatorId),
+		queryContract(env, contractId, ltlIface, 'payoutWindowCap', [], operatorId),
+	]);
+	const caps = { maxJackpotPool: BigInt(poolMaxRes[0]), maxWinAmtCap: BigInt(winCapRes[0]), payoutWindowCap: BigInt(windowCapRes[0]) };
+	caps.maxJackpotPool = BigInt(thresholdWithDecimals);
+	if (caps.payoutWindowCap < caps.maxJackpotPool + caps.maxWinAmtCap) {
+		const fmt = (v) => Number(v) / (10 ** lazyTokenDecimals);
+		console.log(`ERROR: payoutWindowCap (${fmt(caps.payoutWindowCap)}) must be at least maxJackpotPool (${fmt(caps.maxJackpotPool)}) + maxWinAmtCap (${fmt(caps.maxWinAmtCap)}) $LAZY.`);
+		console.log('Raise payoutWindowCap first (updatePayoutWindowCap.js).');
+		return;
+	}
+	if (BigInt(lottoStats[0]) > BigInt(thresholdWithDecimals)) {
+		console.log(`NOTE: the current pool (${Number(lottoStats[0]) / (10 ** lazyTokenDecimals)} $LAZY) is above the new maximum and will be clamped down to it.`);
+	}
 
 	const proceed = readlineSync.keyInYNStrict('Do you want to update the maximum jackpot threshold?');
 	if (!proceed) {

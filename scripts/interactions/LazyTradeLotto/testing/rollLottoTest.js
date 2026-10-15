@@ -34,6 +34,7 @@ const { loadInterface } = require('../../../../utils/abiLoader');
 const { queryContract } = require('../../../../utils/queryHelpers');
 const { contractExecuteFunction } = require('../../../../utils/solidityHelpers');
 const { buildRollSignature, resolveRollParams, parseArgs, parseRollOutcome, isTokenAssociated } = require('./generateSignature');
+const { resolveBurnExempt, resolveRoller } = require('../queries/getUserBurn');
 
 const contractName = 'LazyTradeLotto';
 const GAS = 1_500_000;
@@ -61,10 +62,11 @@ async function main() {
 	const contractId = ContractId.fromString(positionals[0] || process.env.LAZY_TRADE_LOTTO_CONTRACT_ID);
 
 	const ltlIface = loadInterface(contractName);
-	const p = resolveRollParams(flags);
+	// sign for the contract we are about to roll on (v2 signatures are bound to it)
+	const p = await resolveRollParams({ ...flags, contract: flags.contract || contractId.toString() });
 	const decimals = p.lazyDecimals;
 
-	const { signature, signerAddress } = await buildRollSignature(p);
+	const { signature, signerAddress, messageHash } = await buildRollSignature(p);
 
 	console.log('\n-Using ENVIRONMENT:', env);
 	console.log('-Using Operator (roller):', operatorId.toString(), `(${p.roller})`);
@@ -80,6 +82,8 @@ async function main() {
 	console.log('Win threshold:     ', p.winRateThreshold.toString(), `(${Number(p.winRateThreshold) / 1_000_000}%)`);
 	console.log('Prize range:       ', fmtLazy(p.minWinAmt, decimals), '-', fmtLazy(p.maxWinAmt, decimals), '$LAZY');
 	console.log('Jackpot threshold: ', p.jackpotThreshold.toString(), `(${Number(p.jackpotThreshold) / 1_000_000}%)`);
+	console.log('Burn exempt:       ', p.burnExempt);
+	console.log('Deadline:          ', p.deadline.toString(), `(${new Date(Number(p.deadline) * 1000).toISOString()})`);
 
 	// ---- Pre-flight checks ---------------------------------------------------
 	let blocking = false;
@@ -94,6 +98,34 @@ async function main() {
 		console.log('    -> SIGNING_KEY does not match the contract systemWallet; roll WILL revert (InvalidTeamSignature).');
 		blocking = true;
 	}
+
+	// 1a. the roller we signed for must be the address Hedera will use as msg.sender for the
+	//     operator (its EVM alias if it has one, else long-zero)
+	const operatorRoller = await resolveRoller(env, operatorId.toString());
+	const rollerOk = operatorRoller.rollerAddress.toLowerCase() === p.roller.toLowerCase();
+	console.log('  roller:', p.roller, rollerOk ? 'OK (operator msg.sender)' : `MISMATCH! operator rolls as ${operatorRoller.rollerAddress}`);
+	if (!rollerOk) {
+		console.log('    -> signature is for a different address than msg.sender; roll WILL revert (InvalidTeamSignature).');
+		blocking = true;
+	}
+
+	// 1b. our digest == the contract's (catches a wrong --contract / ENVIRONMENT chain id / encoding)
+	const digestRes = await queryContract(env, contractId, ltlIface, 'getRollMessageHash',
+		[p.roller, p.token, p.serial, p.nonce, p.buyer, p.winRateThreshold, p.minWinAmt, p.maxWinAmt, p.jackpotThreshold, p.burnExempt, p.deadline],
+		operatorId);
+	const digestOk = String(digestRes[0]).toLowerCase() === messageHash.toLowerCase();
+	console.log('  roll digest:', digestOk ? 'OK (matches getRollMessageHash)' : 'MISMATCH!');
+	if (!digestOk) {
+		console.log('    -> signed for a different contract/chain than the one rolled on; roll WILL revert (InvalidTeamSignature).');
+		blocking = true;
+	}
+
+	// 1c. maxWin within the contract's cap?
+	const capRes = await queryContract(env, contractId, ltlIface, 'maxWinAmtCap', [], operatorId);
+	const cap = BigInt(capRes[0]);
+	const capOk = p.maxWinAmt <= cap;
+	console.log('  max win cap:', fmtLazy(cap, decimals), '$LAZY', capOk ? 'OK' : `-> --maxWin exceeds it; roll WILL revert (BadArguments "Win Cap").`);
+	if (!capOk) blocking = true;
 
 	// 2. paused?
 	const pausedRes = await queryContract(env, contractId, ltlIface, 'isPaused', [], operatorId);
@@ -110,15 +142,39 @@ async function main() {
 	console.log('  already rolled:', alreadyRolled ? 'YES -> will revert (AlreadyRolled). Change --nonce.' : 'no');
 	if (alreadyRolled) blocking = true;
 
-	// 4. burn % for roller (and detect invalid LSH tokens)
-	try {
-		const burnRes = await queryContract(env, contractId, ltlIface, 'getBurnForUser', [p.roller], operatorId);
-		console.log(`  burn for roller: ${Number(burnRes[0])}% (0% = holds/delegated an LSH NFT)`);
+	// 4. burn exemption: v2 signs it, so compare --burnExempt with what the production rule would sign
+	const lshTokenIds = ['LSH_GEN1_TOKEN_ID', 'LSH_GEN2_TOKEN_ID', 'LSH_GEN1_MUTANT_TOKEN_ID'].map((k) => process.env[k]);
+	if (lshTokenIds.every(Boolean) && process.env.LAZY_DELEGATE_REGISTRY_CONTRACT_ID) {
+		try {
+			const resolved = await resolveBurnExempt({
+				env,
+				user: operatorId.toString(),
+				operatorId,
+				lshTokenIds,
+				ldrId: process.env.LAZY_DELEGATE_REGISTRY_CONTRACT_ID,
+			});
+			const agrees = resolved.burnExempt === p.burnExempt;
+			console.log(`  burn exemption: signing ${p.burnExempt}; LSH holder/valid delegate rule says ${resolved.burnExempt}`,
+				agrees ? 'OK' : '-> differs (allowed for testing, but production must sign the resolved value)');
+		}
+		catch (e) {
+			console.log('  burn exemption: could not resolve LSH holdings/delegations:', e.message);
+		}
 	}
-	catch {
-		console.log('  burn for roller: query reverted -> an LSH token address is likely not a real NFT.');
-		console.log('    If a roll WINS, getBurnForUser is called on-chain and the payout will revert.');
+	else {
+		console.log(`  burn exemption: signing ${p.burnExempt} (set LSH_*_TOKEN_ID + LAZY_DELEGATE_REGISTRY_CONTRACT_ID to cross-check)`);
 	}
+
+	// 4b. payout window: a win larger than what is left in the 24h window reverts PayoutCapReached.
+	//     A jackpot hit pays the whole pool, so count it when the jackpot can be hit.
+	const [, windowPaid, windowCap, windowRemaining] = await queryContract(env, contractId, ltlIface, 'getPayoutWindow', [], operatorId);
+	const jackpotPool = p.jackpotThreshold > 0n
+		? BigInt((await queryContract(env, contractId, ltlIface, 'jackpotPool', [], operatorId))[0])
+		: 0n;
+	const worstCase = p.maxWinAmt + jackpotPool;
+	const windowOk = BigInt(windowRemaining) >= worstCase;
+	console.log(`  payout window: ${fmtLazy(windowPaid, decimals)} / ${fmtLazy(windowCap, decimals)} $LAZY paid in the last 24h`,
+		windowOk ? 'OK' : `-> a max win${jackpotPool > 0n ? ' plus the jackpot' : ''} (${fmtLazy(worstCase, decimals)}) would exceed it; such a roll WILL revert (PayoutCapReached).`);
 
 	// 5. payout recipient must have $LAZY associated (a win transfers $LAZY to msg.sender)
 	const assoc = await isTokenAssociated(env, operatorId.toString(), process.env.LAZY_TOKEN_ID);
@@ -155,7 +211,7 @@ async function main() {
 		client,
 		GAS,
 		'rollLotto',
-		[p.token, p.serial, p.nonce, p.buyer, p.winRateThreshold, p.minWinAmt, p.maxWinAmt, p.jackpotThreshold, signature],
+		[p.token, p.serial, p.nonce, p.buyer, p.winRateThreshold, p.minWinAmt, p.maxWinAmt, p.jackpotThreshold, p.burnExempt, p.deadline, signature],
 	);
 
 	const status = result[0]?.status?.toString?.() || result[0];
