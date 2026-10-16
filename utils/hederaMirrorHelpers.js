@@ -1,6 +1,6 @@
 const { AccountId } = require('@hashgraph/sdk');
 const { default: axios } = require('axios');
-const { ethers } = require('hardhat');
+const { ethers } = require('ethers');
 
 // Entity type enum for mirror node queries
 const EntityType = {
