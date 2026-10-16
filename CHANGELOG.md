@@ -5,6 +5,20 @@ All notable changes to the LazyLotto smart contract project will be documented i
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [npm 1.5.0] - 2026-10-16
+
+Package release of `@lazysuperheroes/lazy-lotto` (ABIs, CLI and utils); no contract changes.
+
+### Changed
+
+- **Runtime dependencies trimmed to what the published files use:** `@hashgraph/sdk`, `@lazysuperheroes/hedera-multisig`, `axios`, `dotenv` and `ethers`. Hardhat toolbox, `solhint`, `chai`, `hardhat-docgen`, `hardhat-contract-sizer`, OpenZeppelin contracts and the script-only packages (`@directus/sdk`, `abi-decoder`, `chalk`, `readline-sync`) moved to `devDependencies`. A fresh install drops from about 1,080 packages to about 370, and most of the audit advisories go with them.
+- Minimum versions raised: `@lazysuperheroes/hedera-multisig` ^2.3.0 (no longer installs `localtunnel` and its `axios` 0.21.4), `axios` ^1.20.0, `ethers` ^6.17.0.
+- ABIs: `LazyLotto` no longer lists `setPrng` and `LazyLottoPoolManager` no longer lists `CannotTransferGlobalPools`; neither exists on the deployed contracts.
+
+### Fixed
+
+- `utils/hederaMirrorHelpers.js` (used by the CLI) required `hardhat` for `ethers`, so the CLI only ran when npm happened to install Hardhat as a peer. It now requires `ethers` directly.
+
 ## [2.1.0] - 2025-12-02
 
 ### 🔴 BREAKING CHANGES
